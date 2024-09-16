@@ -1,0 +1,13 @@
+spring:
+  datasource:
+    url: jdbc:tc:postgresql:11.17-alpine:///solhub
+    hikari:
+      schema: public
+      minimum-idle: 1
+
+solutions-hub:
+  db-lock:
+    create-tables: true
+    lock-acquire-poll-interval: 100
+    lock-acquire-timeout: 1000
+    lock-hold-timeout: 2000

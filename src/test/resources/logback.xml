@@ -1,0 +1,23 @@
+<configuration>
+  <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+    <encoder>
+      <pattern>%d{mm:ss.SSS} %-5level [%thread] %class{1} -- %msg%n</pattern>
+    </encoder>
+  </appender>
+
+  <logger name="org" level="INFO" />
+  <logger name="com" level="INFO" />
+  <logger name="javax" level="INFO" />
+  <logger name="reactor" level="INFO" />
+  <logger name="io" level="INFO" />
+
+  <logger name="com.pia" level="TRACE" />
+  <logger name="liquibase" level="TRACE" />
+  <logger name="org.liquibase" level="TRACE" />
+  <logger name="reactor.netty.http.client" level="WARN"/>
+  <logger name="org.springframework.jdbc" level="DEBUG" />
+
+  <root level="TRACE">
+    <appender-ref ref="STDOUT" />
+  </root>
+</configuration>
