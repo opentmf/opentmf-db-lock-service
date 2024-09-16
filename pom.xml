@@ -181,8 +181,8 @@
                     </execution>
                 </executions>
                 <configuration>
-                    <serverId>iot-solhub-maven-release</serverId>
-                    <nexusUrl>https://nexus.tools.aws.vodafone.com/repository/iot-solhub-maven-release/</nexusUrl>
+                    <serverId>pia-commons-release</serverId>
+                    <nexusUrl>https://nexus.dnext-pia.com/</nexusUrl>
                     <skipStaging>true</skipStaging>
                 </configuration>
             </plugin>
