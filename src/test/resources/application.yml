@@ -1,11 +1,11 @@
 spring:
   datasource:
-    url: jdbc:tc:postgresql:11.17-alpine:///solhub
+    url: jdbc:tc:postgresql:11.17-alpine:///db
     hikari:
       schema: public
       minimum-idle: 1
 
-solutions-hub:
+pia:
   db-lock:
     create-tables: true
     lock-acquire-poll-interval: 100

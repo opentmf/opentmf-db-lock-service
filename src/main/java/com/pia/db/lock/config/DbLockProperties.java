@@ -9,7 +9,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  */
 @Getter
 @Setter
-@ConfigurationProperties(prefix = "solutions-hub.db-lock", ignoreUnknownFields = false)
+@ConfigurationProperties(prefix = "pia.db-lock", ignoreUnknownFields = false)
 public class DbLockProperties {
 
   /**

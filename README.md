@@ -25,7 +25,7 @@ This library creates 3 database tables and interacts with them using pure JDBC a
 The following configuration properties are recognized by the service:
 
 ```yaml
-solutions-hub:
+pia:
     db-lock:
       create-tables: true
       lock-acquire-poll-interval: 1000
@@ -81,3 +81,5 @@ public class SomeServiceImpl implements SomeService {
 ## Version History
 ### 1.0.0
 - Initial Version
+### 1.0.1
+- Documentation fixes
