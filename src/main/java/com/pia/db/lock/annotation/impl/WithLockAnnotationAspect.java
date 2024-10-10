@@ -11,6 +11,9 @@ import org.aspectj.lang.annotation.Aspect;
 import org.springframework.core.env.Environment;
 import org.springframework.stereotype.Component;
 
+/**
+ * author Abdullah Beker
+ */
 @Aspect
 @Component
 @RequiredArgsConstructor
