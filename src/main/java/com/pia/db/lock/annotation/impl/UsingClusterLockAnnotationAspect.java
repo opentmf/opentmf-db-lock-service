@@ -1,14 +1,14 @@
 package com.pia.db.lock.annotation.impl;
 
-import com.pia.db.lock.annotation.WithLock;
+import com.pia.db.lock.annotation.UsingClusterLock;
 import com.pia.db.lock.model.AcquiredLock;
-import com.pia.db.lock.model.LockType;
 import com.pia.db.lock.service.api.DbLockService;
 import lombok.RequiredArgsConstructor;
 import org.aspectj.lang.ProceedingJoinPoint;
 import org.aspectj.lang.annotation.Around;
 import org.aspectj.lang.annotation.Aspect;
 import org.springframework.core.env.Environment;
+import org.springframework.expression.spel.standard.SpelExpressionParser;
 import org.springframework.stereotype.Component;
 
 /**
@@ -17,27 +17,27 @@ import org.springframework.stereotype.Component;
 @Aspect
 @Component
 @RequiredArgsConstructor
-public class WithLockAnnotationAspect {
+public class UsingClusterLockAnnotationAspect {
 
     private final Environment environment;
     private final DbLockService dbLockService;
 
-    @Around("(@annotation(withLock))")
-    private Object wrapWithLock(ProceedingJoinPoint pjp, WithLock withLock) throws Throwable {
-        String requestedVersion = resolveProperty(withLock.requestedVersion());
-        long downgradeAllowedMillis = Long.parseLong(resolveProperty(withLock.downgradeAllowedMillis()));
+    @Around("(@annotation(usingClusterLock))")
+    private Object wrapWithLock(ProceedingJoinPoint pjp, UsingClusterLock usingClusterLock) throws Throwable {
+        String requestedVersion = resolveProperty(usingClusterLock.requestedVersion());
+        long downgradeAllowedMillis = Long.parseLong(resolveProperty(usingClusterLock.downgradeAllowedMillis()));
 
         boolean lockReleased = false;
         AcquiredLock lock = null;
         try {
-            lock = dbLockService.acquireLock(LockType.LOCK_X, requestedVersion);
+            lock = dbLockService.acquireLock(usingClusterLock.lockType(), requestedVersion);
 
             if (lock.isUpgradeRequired(requestedVersion) ||
                     lock.isDowngradeRequired(requestedVersion, downgradeAllowedMillis)) {
 
                 Object result = pjp.proceed();  // Execute the actual business logic
 
-                dbLockService.releaseLock(lock, true);  // Release the lock after completing the task
+                dbLockService.releaseLock(lock, usingClusterLock.saveHistoryOnSuccess());  // Release the lock after completing the task
                 lockReleased = true;
 
                 return result;
@@ -59,9 +59,15 @@ public class WithLockAnnotationAspect {
 
     private String resolveProperty(String value) {
         if (value.startsWith("${") && value.endsWith("}")) {
-            String propertyKey = value.substring(2, value.length() - 1);
-            return environment.getProperty(propertyKey);
+            return environment.getProperty(parseValue(value));
+        }
+        if (value.startsWith("#{") && value.endsWith("}")) {
+            return new SpelExpressionParser().parseExpression(parseValue(value)).getValue(String.class);
         }
         return value;
+    }
+
+    private String parseValue(String value) {
+        return value.substring(2, value.length() - 1).trim();
     }
 }

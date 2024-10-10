@@ -1,5 +1,7 @@
 package com.pia.db.lock.annotation;
 
+import com.pia.db.lock.model.LockType;
+
 import java.lang.annotation.ElementType;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
@@ -10,8 +12,10 @@ import java.lang.annotation.Target;
  */
 @Retention(RetentionPolicy.RUNTIME)
 @Target(ElementType.METHOD)
-public @interface WithLock {
+public @interface UsingClusterLock {
 
-    String requestedVersion() default "0";
+    LockType lockType();
+    boolean saveHistoryOnSuccess() default true;
+    String requestedVersion();
     String downgradeAllowedMillis() default "0L";
 }
