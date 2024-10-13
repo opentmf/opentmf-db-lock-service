@@ -22,7 +22,7 @@ public class UsingClusterLockAnnotationAspect {
   private final Environment environment;
   private final DbLockService dbLockService;
 
-  @Around("(@annotation(usingClusterLock))")
+  @Around("@annotation(usingClusterLock)")
   private Object wrapWithLock(ProceedingJoinPoint pjp, UsingClusterLock usingClusterLock)
       throws Throwable {
     String requestedVersion = resolveProperty(usingClusterLock.requestedVersion());

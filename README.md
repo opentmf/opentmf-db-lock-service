@@ -37,44 +37,31 @@ The timeout values are in milliseconds and the above table contains the default 
 Similarly, create-tables property is true by default, which causes the required tables to be created automatically at the application start, if they not already exist. The creation script is for PostgreSQL. However, to use the library with other database vendors, it is possible to set this property to false and create the tables through your application mechanism, for example manually, or with the help of liquibase.
 
 ## Sample Usage
-```java
+`@UsingClusterLock` annotation is provided by the pia-db-lock-service to simplify acquiring and releasing locks.
 
+Using that annotation requires the following configuration within your microservice:
+
+```java
+@Configuration
+@EnableAspectJAutoProxy
+@ComponentScan(basePackages = "com.pia.db.lock.annotation")
+public class EnableDbLockAspectConfig {
+}
+```
+And now, some sample service implementation can use the `@UsingClusterLock` annotation similar to the following:
+
+```java
+@Service
+@Slf4j
 @RequiredArgsConstructor
 public class SomeServiceImpl implements SomeService {
 
   private final DbLockService dbLockService;
 
-  private void doWithDbLock(String requestedVersion, long downgradeAllowedMillis) throws DbLockException {
-    boolean lockReleased = false;
-    AcquiredLock lock = null;
-    try {
-      lock = dbLockService.acquireLock(LockType.LOCK_X, requestedVersion);
-      if (lock.isUpgradeRequired(requestedVersion) ||
-          lock.isDowngradeRequired(requestedVersion, downgradeAllowedMillis)) {
-
-        // Either upgrade or downgrade.
-        // Do what you need to do here.
-        ...
-
-        // And then
-        releaseLock(lock, true);
-        lockReleased = true;
-      } else {
-        dbLockService.releaseLock(lock, false);
-        lockReleased = true;
-        log.info("Already up-to-date.", lock.getPreviousLockVersion());
-      }
-    } catch (Exception e) {
-      dbLockService.releaseLock(lock, false);
-      lockReleased = true;
-      throw new IllegalStateException("Could not perform the task because of exception", e);
-    } finally {
-      if (!lockReleased) {
-        releaseLock(lock, false);
-      }
-    }
+  @UsingClusterLock(lockType = LockType.LOCK_X, requestedVersion = "${test.properties.version}")
+  public void performTask() {
+    log.debug("Performing task inside a cluster level lock.");
   }
-
 }
 ```
 
@@ -83,3 +70,5 @@ public class SomeServiceImpl implements SomeService {
 - Initial Version
 ### 1.0.1
 - Documentation fixes
+### 1.0.2
+- Adds `@UsingClusterLock` annotation

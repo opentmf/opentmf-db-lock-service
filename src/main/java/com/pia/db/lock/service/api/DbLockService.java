@@ -10,7 +10,7 @@ import com.pia.db.lock.model.LockType;
 public interface DbLockService {
 
   /**
-   * Acquires a logical lock on the DB.
+   * Acquires a persistent lock on the DB.
    *
    * @param lockType The lock type.
    * @param lockVersion The related lock type's version.
