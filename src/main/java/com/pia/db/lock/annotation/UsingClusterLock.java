@@ -8,6 +8,11 @@ import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
 
 /**
+ * Annotation that enables the code to be executed within a cluster level db lock
+ * Mandatory fields:
+ * - lockType: Lock type to be used.
+ * - requestedVersion: The version of the lock to be retrieved.
+ *
  * @author Abdullah Beker
  */
 @Retention(RetentionPolicy.RUNTIME)
@@ -16,14 +21,8 @@ public @interface UsingClusterLock {
 
   /**
    * Lock type to be used.
-   * */
-  LockType lockType();
-
-  /**
-   * If true, a record will be inserted into lock history table after the task is completed
-   * successfully.
    */
-  boolean saveHistoryOnSuccess() default true;
+  LockType lockType();
 
   /**
    * The version of the lock to be retrieved.
@@ -33,9 +32,9 @@ public @interface UsingClusterLock {
   String requestedVersion();
 
   /**
-   * Maximum allowed duration in milliseconds to allow a downgrade.
+   * Maximum allowed duration in milliseconds to allow a downgrade. Defaults to 10 minutes if not specified.
    *
    * @see com.pia.db.lock.model.AcquiredLock#isDowngradeRequired(String, long)
    */
-  String downgradeAllowedMillis() default "0L";
+  String downgradeAllowedMillis() default "600000";
 }

@@ -39,9 +39,7 @@ public class UsingClusterLockAnnotationAspect {
 
         Object result = pjp.proceed(); // Execute the actual business logic
 
-        dbLockService.releaseLock(
-            lock,
-            usingClusterLock.saveHistoryOnSuccess()); // Release the lock after completing the task
+        dbLockService.releaseLock(lock, true); // Release the lock after completing the task
         lockReleased = true;
 
         return result;
@@ -50,11 +48,13 @@ public class UsingClusterLockAnnotationAspect {
         lockReleased = true;
       }
     } catch (Exception e) {
-      dbLockService.releaseLock(lock, false);
-      lockReleased = true;
+      if (lock != null) {
+        dbLockService.releaseLock(lock, false);
+        lockReleased = true;
+      }
       throw e;
     } finally {
-      if (!lockReleased) {
+      if (!lockReleased && lock != null) {
         dbLockService.releaseLock(lock, false);
       }
     }
