@@ -4,6 +4,7 @@ import com.pia.db.lock.annotation.UsingClusterLock;
 import com.pia.db.lock.model.AcquiredLock;
 import com.pia.db.lock.service.api.DbLockService;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.aspectj.lang.ProceedingJoinPoint;
 import org.aspectj.lang.annotation.Around;
 import org.aspectj.lang.annotation.Aspect;
@@ -17,6 +18,7 @@ import org.springframework.stereotype.Component;
 @Aspect
 @Component
 @RequiredArgsConstructor
+@Slf4j
 public class UsingClusterLockAnnotationAspect {
 
   private final Environment environment;
@@ -44,6 +46,7 @@ public class UsingClusterLockAnnotationAspect {
 
         return result;
       } else {
+        log.debug("Requested lock version is already the latest. Not calling service method.");
         dbLockService.releaseLock(lock, false);
         lockReleased = true;
       }
