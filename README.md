@@ -36,50 +36,68 @@ The timeout values are in milliseconds and the above table contains the default 
 
 Similarly, create-tables property is true by default, which causes the required tables to be created automatically at the application start, if they not already exist. The creation script is for PostgreSQL. However, to use the library with other database vendors, it is possible to set this property to false and create the tables through your application mechanism, for example manually, or with the help of liquibase.
 
-## Sample Usage
-```java
+## Usage
+The pia-db-lock-library is automatically included from pia-bpmn-sync-service and pia-catalog-sync-service. Therefore, there is no need to include a dependency to it, if the client uses one of the mentioned libraries.
 
-@RequiredArgsConstructor
+However, it is also possible to directly give a dependency to this library, for certain tasks that require to be performed within a cluster level lock plus to keep version history of successful completions.
+
+### Import pia-commons-versions
+```xml
+<dependencyManagement>
+  <dependencies>
+    <dependency>
+      <groupId>com.pia.commons</groupId>
+      <artifactId>pia-commons-versions</artifactId>
+      <version>RELEASE</version>
+      <type>pom</type>
+      <scope>import</scope>
+    </dependency>
+  </dependencies>
+</dependencyManagement>
+```
+### Add Maven Dependency
+```xml
+<dependency>
+  <groupId>com.pia.commons</groupId>
+  <artifactId>pia-db-lock-service</artifactId>
+</dependency>
+```
+### Implementation with `@UsingClusterLock`
+`@UsingClusterLock` annotation is provided by the pia-db-lock-service to simplify acquiring and releasing locks. After acquiring the specified lock, it executes the code within the service method and releases the lock after the method ends.
+
+Below is: a sample service implementation with `@UsingClusterLock` annotation:
+
+```java
+@Service
+@Slf4j
 public class SomeServiceImpl implements SomeService {
 
-  private final DbLockService dbLockService;
-
-  private void doWithDbLock(String requestedVersion, long downgradeAllowedMillis) throws DbLockException {
-    boolean lockReleased = false;
-    AcquiredLock lock = null;
-    try {
-      lock = dbLockService.acquireLock(LockType.LOCK_X, requestedVersion);
-      if (lock.isUpgradeRequired(requestedVersion) ||
-          lock.isDowngradeRequired(requestedVersion, downgradeAllowedMillis)) {
-
-        // Either upgrade or downgrade.
-        // Do what you need to do here.
-        ...
-
-        // And then
-        releaseLock(lock, true);
-        lockReleased = true;
-      } else {
-        dbLockService.releaseLock(lock, false);
-        lockReleased = true;
-        log.info("Already up-to-date.", lock.getPreviousLockVersion());
-      }
-    } catch (Exception e) {
-      dbLockService.releaseLock(lock, false);
-      lockReleased = true;
-      throw new IllegalStateException("Could not perform the task because of exception", e);
-    } finally {
-      if (!lockReleased) {
-        releaseLock(lock, false);
-      }
-    }
+  @UsingClusterLock(lockType = LockType.LOCK_X, requestedVersion = "${test.properties.version}")
+  public void performTask() {
+    log.debug("Performing task inside a cluster level lock.");
   }
-
 }
 ```
+This code will cause the following:
+- A lock will be acquired for lockType = X
+- If the lock cannot be acquired within the configured duration or attempts:
+  - Then the service method will not be executed.
+- If the acquired lock's version is the same as the requested version:
+  - Then the service method will not be executed.
+- Else:
+  - If one of the following conditions are met:
+    - no previous lock of that lockType exists,
+    - previous lock version is smaller than the requested
+    - previous lock version is greater than the requested and the `downgradeAllowedMillis` duration is met (i.e. rollback is applicable)
+  - Then the service method will be executed.
+  - Otherwise, the service method will NOT be executed.
+- And finally, the acquired lock will be released.
+  - If the service method was executed and successful, the `db_lock_latest` record will be updated. 
 
 ## Version History
 ### 1.0.0
 - Initial Version
 ### 1.0.1
 - Documentation fixes
+### 1.0.2
+- Adds `@UsingClusterLock` annotation

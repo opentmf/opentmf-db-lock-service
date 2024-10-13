@@ -12,6 +12,8 @@ import org.springframework.boot.autoconfigure.liquibase.LiquibaseAutoConfigurati
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.boot.sql.init.dependency.DatabaseInitializationDependencyConfigurer;
 import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.ComponentScan;
+import org.springframework.context.annotation.EnableAspectJAutoProxy;
 import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.JdbcTemplate;
 
@@ -22,6 +24,8 @@ import org.springframework.jdbc.core.JdbcTemplate;
 @ConditionalOnClass({DataSource.class})
 @ConditionalOnProperty(name = "spring.datasource.url")
 @EnableConfigurationProperties(DbLockProperties.class)
+@EnableAspectJAutoProxy
+@ComponentScan(basePackages = "com.pia.db.lock.annotation")
 @Import(DatabaseInitializationDependencyConfigurer.class)
 @Slf4j
 public class DbLockAutoConfiguration {

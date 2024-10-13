@@ -118,12 +118,14 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
         return JdbcHelper.autoIncrementInsert(conn, SQL_INSERT_LOCK,
             lockType.getDbValue(), lockVersion, getHostName());
       } catch (SQLException e) {
+        log.warn("errorCode: {}, sqlState: {}, description: {}", e.getErrorCode(), e.getSQLState(),
+            e.getMessage());
         if ((System.currentTimeMillis() - t0) > dbLockProperties.getLockAcquireTimeout()) {
           String message = String.format("Cannot acquire DB Lock for %s within the configured " +
               "%d millis. Giving up.", lockType, dbLockProperties.getLockAcquireTimeout());
           throw new DbLockTimeoutException(message);
         }
-        log.debug("Sleeping {} milliseconds for the existing {} lock to be released.",
+        log.debug("Sleeping {} milliseconds before re-attempting to acquire {} lock.",
             dbLockProperties.getLockAcquirePollInterval(), lockType);
         sleepUntilNextPoll();
       }
