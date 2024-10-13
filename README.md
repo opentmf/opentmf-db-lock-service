@@ -37,18 +37,7 @@ The timeout values are in milliseconds and the above table contains the default 
 Similarly, create-tables property is true by default, which causes the required tables to be created automatically at the application start, if they not already exist. The creation script is for PostgreSQL. However, to use the library with other database vendors, it is possible to set this property to false and create the tables through your application mechanism, for example manually, or with the help of liquibase.
 
 ## Sample Usage
-`@UsingClusterLock` annotation is provided by the pia-db-lock-service to simplify acquiring and releasing locks.
-
-Using that annotation requires the following configuration within your microservice:
-
-```java
-@Configuration
-@EnableAspectJAutoProxy
-@ComponentScan(basePackages = "com.pia.db.lock.annotation")
-public class EnableDbLockAspectConfig {
-}
-```
-And now, some sample service implementation can use the `@UsingClusterLock` annotation similar to the following:
+`@UsingClusterLock` annotation is provided by the pia-db-lock-service to simplify acquiring and releasing locks. Below is a sample service implementation can use the `@UsingClusterLock` annotation similar to the following:
 
 ```java
 @Service
@@ -64,6 +53,8 @@ public class SomeServiceImpl implements SomeService {
   }
 }
 ```
+
+`@UsingClusterLock` will acquire a lock before the execution of the annotated method, and release it in case of successful completion or an exception with the help of AOP.
 
 ## Version History
 ### 1.0.0
