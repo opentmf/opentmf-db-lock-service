@@ -6,7 +6,8 @@ import lombok.Setter;
 @Getter
 @Setter
 public class LockContext {
+
   private LatestLock latestLock;
-  private boolean upgradeRequired;
+  private boolean upgrade;
   private String requestedVersion;
 }

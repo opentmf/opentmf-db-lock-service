@@ -123,16 +123,16 @@ public class SomeServiceImpl implements SomeService {
 
   @UsingClusterLock(lockType = LockType.LOCK_Y, requestedVersion = "#{3 + '.0'}")
   public void performTask(String arg1, LockContext context, Long arg2) {
-    
-    System.out.println(context.getRequestedVersion());
-    
-    if (context.isUpgradeRequired()) {
+
+    log.debug("Lock requested version {}", context.getRequestedVersion());
+
+    if (context.isUpgrade()) {
       log.debug("Performing upgrade task inside a cluster level lock.");
-      
+
       if (context.getLatestLock() != null) {
-        System.out.println(context.getLatestLock().getLockVersion());
+        log.debug("Previous lock version was {}", context.getLatestLock().getLockVersion());
       }
-    
+
     } else {
       log.debug("Performing downgrade task inside a cluster level lock.");
     }
@@ -168,3 +168,5 @@ public class SomeOtherServiceImpl implements SomeOtherService {
 - Documentation fixes
 ### 1.0.2
 - Adds `@UsingClusterLock` annotation
+### 1.0.3
+- Adds support for `LockContext` parameter in methods annotated with `@UsingClusterLock` to retrieve lock details.

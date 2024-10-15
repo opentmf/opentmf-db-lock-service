@@ -103,7 +103,7 @@ public class UsingClusterLockAnnotationAspect {
           lockContext.setLatestLock(
               new LatestLock(lock.getPreviousLockVersion(), lock.getPreviousLockReleasedAt()));
         }
-        lockContext.setUpgradeRequired(lock.isUpgradeRequired(requestedVersion));
+        lockContext.setUpgrade(lock.isUpgradeRequired(requestedVersion));
         lockContext.setRequestedVersion(requestedVersion);
         methodArgs[i] = lockContext;
         return methodArgs;
