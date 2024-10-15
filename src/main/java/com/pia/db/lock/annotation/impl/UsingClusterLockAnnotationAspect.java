@@ -2,15 +2,21 @@ package com.pia.db.lock.annotation.impl;
 
 import com.pia.db.lock.annotation.UsingClusterLock;
 import com.pia.db.lock.model.AcquiredLock;
+import com.pia.db.lock.model.LatestLock;
+import com.pia.db.lock.model.LockContext;
 import com.pia.db.lock.service.api.DbLockService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.aspectj.lang.ProceedingJoinPoint;
 import org.aspectj.lang.annotation.Around;
 import org.aspectj.lang.annotation.Aspect;
+import org.aspectj.lang.reflect.MethodSignature;
 import org.springframework.core.env.Environment;
 import org.springframework.expression.spel.standard.SpelExpressionParser;
 import org.springframework.stereotype.Component;
+
+import java.lang.reflect.Method;
+import java.lang.reflect.Parameter;
 
 /**
  * @author Abdullah Beker
@@ -39,7 +45,9 @@ public class UsingClusterLockAnnotationAspect {
       if (lock.isUpgradeRequired(requestedVersion)
           || lock.isDowngradeRequired(requestedVersion, downgradeAllowedMillis)) {
 
-        Object result = pjp.proceed(); // Execute the actual business logic
+        Object[] methodArgs = this.fillContext(pjp, lock, requestedVersion);
+
+        Object result = pjp.proceed(methodArgs); // Execute the actual business logic
 
         dbLockService.releaseLock(lock, true); // Release the lock after completing the task
         lockReleased = true;
@@ -76,5 +84,31 @@ public class UsingClusterLockAnnotationAspect {
 
   private String parseValue(String value) {
     return value.substring(2, value.length() - 1).trim();
+  }
+
+  private Object[] fillContext(
+      ProceedingJoinPoint joinPoint, AcquiredLock lock, String requestedVersion) {
+    MethodSignature methodSignature = (MethodSignature) joinPoint.getSignature();
+    Method method = methodSignature.getMethod();
+    Parameter[] parameters = method.getParameters();
+    Object[] methodArgs = joinPoint.getArgs();
+
+    for (int i = 0; i < parameters.length; i++) {
+      if (parameters[i].getType() == LockContext.class) {
+        LockContext lockContext = (LockContext) methodArgs[i];
+        if (lockContext == null) {
+          lockContext = new LockContext();
+        }
+        if (lock.getPreviousLockVersion() != null || lock.getPreviousLockReleasedAt() != null) {
+          lockContext.setLatestLock(
+              new LatestLock(lock.getPreviousLockVersion(), lock.getPreviousLockReleasedAt()));
+        }
+        lockContext.setUpgrade(lock.isUpgradeRequired(requestedVersion));
+        lockContext.setRequestedVersion(requestedVersion);
+        methodArgs[i] = lockContext;
+        return methodArgs;
+      }
+    }
+    return methodArgs;
   }
 }

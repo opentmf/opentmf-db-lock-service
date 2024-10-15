@@ -1,6 +1,7 @@
 package com.pia.db.lock.service;
 
 import com.pia.db.lock.annotation.UsingClusterLock;
+import com.pia.db.lock.model.LockContext;
 import com.pia.db.lock.model.LockType;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -46,5 +47,20 @@ public class AnnotatedTestService {
   @UsingClusterLock(lockType = LockType.LOCK_Z, requestedVersion = "#{2 + 1 + '.0'")
   public void taskWithCorruptedExpressionFormat() {
     log.debug("task with corrupted expression format is running");
+  }
+
+  @UsingClusterLock(lockType = LockType.LOCK_Y, requestedVersion = "4.0")
+  public String taskWithCustomArg(String arg1) {
+    return arg1;
+  }
+
+  @UsingClusterLock(lockType = LockType.LOCK_Y, requestedVersion = "5.0")
+  public String taskWithCustomArgAndContextArg(String arg1, LockContext context) {
+    return context.getLatestLock().getLockVersion() + arg1;
+  }
+
+  @UsingClusterLock(lockType = LockType.LOCK_Y, requestedVersion = "5.0")
+  public LockContext taskWithContextArg(LockContext context) {
+    return context;
   }
 }
