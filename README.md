@@ -94,6 +94,73 @@ This code will cause the following:
 - And finally, the acquired lock will be released.
   - If the service method was executed and successful, the `db_lock_latest` record will be updated. 
 
+If you need the details of lock in your service methods, you can add a parameter with `LockContext` type in your methods, then `@UsingClusterLock` will inject the lock details into this new parameter. When calling your service methods in other services, you can initialize a new `LockContext` object and pass it to your method, or you can pass null and `@UsingClusterLock` will initialize a new instance. 
+
+Also, you can provide other parameters to your service methods along with `LockContext` parameter. The order of the parameters is not important. `@UsingClusterLock` will inject the lock details to every parameter with the type of `LockContext`.
+
+```java
+import com.pia.db.lock.model.LockContext;
+
+@Slf4j
+@Service
+public class SomeServiceImpl implements SomeService {
+
+  @UsingClusterLock(lockType = LockType.LOCK_Y, requestedVersion = "#{3 + '.0'}")
+  public void performTask(LockContext context) { // @UsingClusterLock will inject lock details
+    log.debug("Performing task inside a cluster level lock.");
+  }
+}
+```
+
+Or along with your custom parameters:
+
+```java
+import com.pia.db.lock.model.LockContext;
+
+@Slf4j
+@Service
+public class SomeServiceImpl implements SomeService {
+
+  @UsingClusterLock(lockType = LockType.LOCK_Y, requestedVersion = "#{3 + '.0'}")
+  public void performTask(String arg1, LockContext context, Long arg2) {
+    
+    System.out.println(context.getRequestedVersion());
+    
+    if (context.isUpgradeRequired()) {
+      log.debug("Performing upgrade task inside a cluster level lock.");
+      
+      if (context.getLatestLock() != null) {
+        System.out.println(context.getLatestLock().getLockVersion());
+      }
+    
+    } else {
+      log.debug("Performing downgrade task inside a cluster level lock.");
+    }
+  }
+}
+```
+
+You can call the above method in other services like below:
+
+```java
+import com.pia.db.lock.model.LockContext;
+
+@RestController
+@RequiredArgsConstructor
+public class SomeOtherServiceImpl implements SomeOtherService {
+
+  private final SomeService someService;
+
+  public void performTask() {
+    someService.performTask("test", new LockContext(), 4L); // Initialize yourself
+  }
+
+  public void performTask1() {
+    someService.performTask("test", null, 4L); // Or pass null
+  }
+}
+```
+
 ## Version History
 ### 1.0.0
 - Initial Version
