@@ -96,55 +96,81 @@ This code will cause the following:
 
 If you need the details of lock in your service methods, you can add a parameter with `LockContext` type in your methods, then `@UsingClusterLock` will inject the lock details into this new parameter. When calling your service methods in other services, you can initialize a new `LockContext` object and pass it to your method, or you can pass null and `@UsingClusterLock` will initialize a new instance. 
 
-Also, you can provide other parameters to your service methods along with `LockContext` parameter. The order of the parameters is not important. `@UsingClusterLock` will inject the lock details to every parameter with the type of `LockContext`.
-
+There is a special record class called `LockContext`. If `LockContext` is included in the parameter list of your service method, its fields will automatically be set. Here is the contents of the `LockContext` record:
 ```java
-import com.pia.db.lock.model.LockContext;
+@Getter
+@Setter
+public class LockContext {
 
-@Slf4j
-@Service
-public class SomeServiceImpl implements SomeService {
+  /**
+   * The latest successfully performed lock details.
+   *
+   * @see LatestLock
+   */
+  private LatestLock latestLock;
 
-  @UsingClusterLock(lockType = LockType.LOCK_Y, requestedVersion = "#{3 + '.0'}")
-  public void performTask(LockContext context) { // @UsingClusterLock will inject lock details
-    log.debug("Performing task inside a cluster level lock.");
-  }
+  /**
+   * <strong>true</strong>, if we are performing an upgrade, or <strong>false</strong> if
+   * downgrade.
+   */
+  private boolean upgrade;
+
+  /**
+   * The resolved value of the <code>requestedVersion</code> parameter of
+   * <code>@UsingClusterLock</code>.
+   */
+  private String requestedVersion;
+}
+
+```
+And here is the contents of the LatestLock class:
+```java
+/**
+ * The latest successfully performed lock's details.
+ *
+ * @author Gokhan Demir
+ */
+@RequiredArgsConstructor
+@Getter
+@ToString
+public class LatestLock {
+
+  /**
+   * The latest successfully performed lock's version.
+   */
+  private final String lockVersion;
+
+  /**
+   * The latest successfully performed lock was release at this date-time.
+   */
+  private final OffsetDateTime lockReleasedAt;
 }
 ```
-
-Or along with your custom parameters:
+An example of reaching the attributes of the LockContext inside the service method implementation that contains a LockContext parameter:
 
 ```java
-import com.pia.db.lock.model.LockContext;
-
 @Slf4j
 @Service
 public class SomeServiceImpl implements SomeService {
 
-  @UsingClusterLock(lockType = LockType.LOCK_Y, requestedVersion = "#{3 + '.0'}")
-  public void performTask(String arg1, LockContext context, Long arg2) {
+  @UsingClusterLock(lockType = LockType.LOCK_Y, requestedVersion = "${test.properties.version}")
+  public void performTask(String arg1, LockContext ctx, Long arg2) {
 
-    log.debug("Lock requested version {}", context.getRequestedVersion());
+    // log resolved requestedLock version string
+    log.debug("Requested lock version: {}, previous lock: {}", 
+      ctx.getRequestedVersion(), ctx.getLatestLock());
 
-    if (context.isUpgrade()) {
-      log.debug("Performing upgrade task inside a cluster level lock.");
-
-      if (context.getLatestLock() != null) {
-        log.debug("Previous lock version was {}", context.getLatestLock().getLockVersion());
-      }
-
+    if (ctx.isUpgrade()) {
+      log.debug("Performing upgrade.");
     } else {
-      log.debug("Performing downgrade task inside a cluster level lock.");
+      log.debug("Performing downgrade.");
     }
   }
 }
 ```
-
-You can call the above method in other services like below:
+You can call the above method in other services like the following:
 
 ```java
-import com.pia.db.lock.model.LockContext;
-
 @RestController
 @RequiredArgsConstructor
 public class SomeOtherServiceImpl implements SomeOtherService {
@@ -152,11 +178,7 @@ public class SomeOtherServiceImpl implements SomeOtherService {
   private final SomeService someService;
 
   public void performTask() {
-    someService.performTask("test", new LockContext(), 4L); // Initialize yourself
-  }
-
-  public void performTask1() {
-    someService.performTask("test", null, 4L); // Or pass null
+    someService.performTask("test", new LockContext(), 4L);
   }
 }
 ```

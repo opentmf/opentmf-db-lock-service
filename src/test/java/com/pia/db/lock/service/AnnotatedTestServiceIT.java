@@ -4,15 +4,14 @@ import com.pia.db.lock.config.TestProperties;
 import com.pia.db.lock.exception.DbLockException;
 import com.pia.db.lock.model.LockContext;
 import com.pia.db.lock.model.LockType;
+import java.lang.reflect.UndeclaredThrowableException;
+import java.time.OffsetDateTime;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.context.ActiveProfiles;
-
-import java.lang.reflect.UndeclaredThrowableException;
-import java.time.OffsetDateTime;
 
 @SpringBootTest
 @ActiveProfiles("it")
@@ -47,7 +46,7 @@ class AnnotatedTestServiceIT {
   }
 
   @Test
-  public void testServiceUsingClusterLock_withProperty_resolveProperty() {
+  void testServiceUsingClusterLock_withProperty_resolveProperty() {
     annotatedTestPersistenceService.deleteLocks(LockType.LOCK_Z);
     annotatedTestService.lockWithPropertyValue();
     String latestLockVersion =
@@ -56,17 +55,16 @@ class AnnotatedTestServiceIT {
   }
 
   @Test
-  public void testServiceUsingClusterLock_withExpression_resolveExpression() {
+  void testServiceUsingClusterLock_withExpression_resolveExpression() {
     annotatedTestPersistenceService.deleteLocks(LockType.LOCK_Z);
     annotatedTestService.taskWithExpression();
     String latestLockVersion =
         annotatedTestPersistenceService.getLatestLockVersion(LockType.LOCK_Z);
-    Assertions.assertEquals(latestLockVersion, "2.0");
+    Assertions.assertEquals("2.0", latestLockVersion);
   }
 
   @Test
-  public void
-      testServiceUsingClusterLock_withAlreadyAcquiredLock_doesNotAcquireLockDoNotUpdateHistory() {
+  void testServiceUsingClusterLock_withAlreadyAcquiredLock_doesNotAcquireLockDoNotUpdateHistory() {
     annotatedTestPersistenceService.deleteLocks(LockType.LOCK_Z);
     annotatedTestPersistenceService.insertLock(LockType.LOCK_Z, "3.0");
     var initialCount = annotatedTestPersistenceService.historyCount(LockType.LOCK_Z);
@@ -80,8 +78,7 @@ class AnnotatedTestServiceIT {
   }
 
   @Test
-  public void
-      testServiceUsingClusterLock_withDowngradeRequired_downgradeLatestVersionSaveHistory() {
+  void testServiceUsingClusterLock_withDowngradeRequired_downgradeLatestVersionSaveHistory() {
     annotatedTestPersistenceService.deleteLocks(LockType.LOCK_Z);
     var initialCount = annotatedTestPersistenceService.historyCount(LockType.LOCK_Z);
     annotatedTestPersistenceService.insertLockLatest(
@@ -95,7 +92,7 @@ class AnnotatedTestServiceIT {
   }
 
   @Test
-  public void testServiceUsingClusterLock_withNoUpgradeRequired_doNothingReturnNull() {
+  void testServiceUsingClusterLock_withNoUpgradeRequired_doNothingReturnNull() {
     annotatedTestPersistenceService.deleteLocks(LockType.LOCK_Z);
     var initialCount = annotatedTestPersistenceService.historyCount(LockType.LOCK_Z);
     annotatedTestPersistenceService.insertLockLatest(LockType.LOCK_Z, "3.0", OffsetDateTime.now());
@@ -106,7 +103,7 @@ class AnnotatedTestServiceIT {
   }
 
   @Test
-  public void testServiceUsingClusterLock_withCorruptedPropertyFormat_doesNothingThrowsException() {
+  void testServiceUsingClusterLock_withCorruptedPropertyFormat_doesNothingThrowsException() {
     annotatedTestPersistenceService.deleteLocks(LockType.LOCK_Z);
     Exception exception =
         Assertions.assertThrows(
@@ -117,7 +114,7 @@ class AnnotatedTestServiceIT {
   }
 
   @Test
-  public void testServiceUsingClusterLock_withCorruptedExpression_doesNothingThrowsException() {
+  void testServiceUsingClusterLock_withCorruptedExpression_doesNothingThrowsException() {
     annotatedTestPersistenceService.deleteLocks(LockType.LOCK_Z);
     Exception exception =
         Assertions.assertThrows(
@@ -128,7 +125,7 @@ class AnnotatedTestServiceIT {
   }
 
   @Test
-  public void testServiceUsingClusterLock_withCustomArg_passCustomArgToActualMethod() {
+  void testServiceUsingClusterLock_withCustomArg_passCustomArgToActualMethod() {
     annotatedTestPersistenceService.deleteLocks(LockType.LOCK_Y);
     String arg = "lock_y";
     String returnValue = this.annotatedTestService.taskWithCustomArg(arg);
@@ -136,8 +133,7 @@ class AnnotatedTestServiceIT {
   }
 
   @Test
-  public void
-      testServiceUsingClusterLock_withCustomArgAndContextArg_passCustomArgAndContextArgToActualMethod() {
+  void testServiceUsingClusterLock_withCustomArgAndContextArg_passCustomArgAndContextArgToActualMethod() {
     annotatedTestPersistenceService.deleteLocks(LockType.LOCK_Y);
     annotatedTestPersistenceService.insertLockLatest(LockType.LOCK_Y, "4.0", OffsetDateTime.now());
     String arg = "lock_y";
@@ -147,20 +143,18 @@ class AnnotatedTestServiceIT {
   }
 
   @Test
-  public void testServiceUsingClusterLock_withContextArg_passContextArgToActualMethod() {
+  void testServiceUsingClusterLock_withContextArg_passContextArgToActualMethod() {
     annotatedTestPersistenceService.deleteLocks(LockType.LOCK_Y);
     annotatedTestPersistenceService.insertLockLatest(LockType.LOCK_Y, "4.0", OffsetDateTime.now());
     LockContext context = this.annotatedTestService.taskWithContextArg(new LockContext());
     Assertions.assertNotNull(context);
-    Assertions.assertEquals(context.getLatestLock().getLockVersion(), "4.0");
+    Assertions.assertEquals("4.0", context.getLatestLock().getLockVersion());
   }
 
   @Test
-  public void
-      testServiceUsingClusterLock_withNullContextArgAndNoPreviousLock_passContextArgToActualMethod() {
+  void testServiceUsingClusterLock_withNullContextArgAndNoPreviousLock_passesNullToActualMethod() {
     annotatedTestPersistenceService.deleteLocks(LockType.LOCK_Y);
     LockContext context = this.annotatedTestService.taskWithContextArg(null);
-    Assertions.assertNotNull(context);
-    Assertions.assertNull(context.getLatestLock());
+    Assertions.assertNull(context);
   }
 }
