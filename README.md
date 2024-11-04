@@ -192,3 +192,5 @@ public class SomeOtherServiceImpl implements SomeOtherService {
 - Adds `@UsingClusterLock` annotation
 ### 1.0.3
 - Adds support for `LockContext` parameter in methods annotated with `@UsingClusterLock` to retrieve lock details.
+### 1.0.4
+- Updates dependent library versions to their latest.
