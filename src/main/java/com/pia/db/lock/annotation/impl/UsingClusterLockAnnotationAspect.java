@@ -4,6 +4,7 @@ import com.pia.db.lock.annotation.UsingClusterLock;
 import com.pia.db.lock.model.AcquiredLock;
 import com.pia.db.lock.model.LatestLock;
 import com.pia.db.lock.model.LockContext;
+import com.pia.db.lock.model.VersionChange;
 import com.pia.db.lock.service.api.DbLockService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -38,23 +39,18 @@ public class UsingClusterLockAnnotationAspect {
     try {
       lock = dbLockService.acquireLock(usingClusterLock.lockType(), requestedVersion);
 
-      if (lock.isUpgradeRequired(requestedVersion)
-          || lock.isDowngradeRequired(requestedVersion, downgradeAllowedMillis)) {
+      // Execute the actual business logic
+      Object result =
+          pjp.proceed(
+              enrichFirstLockContextIfAny(pjp, lock, requestedVersion, downgradeAllowedMillis));
 
-        // Execute the actual business logic
-        Object result = pjp.proceed(enrichFirstLockContextIfAny(pjp, lock, requestedVersion));
+      // No exception from the service method means we have a successful completion.
+      // Release the lock and update latest_lock record.
+      dbLockService.releaseLock(lock, true);
+      lockReleased = true;
 
-        // No exception from the service method means we have a successful completion.
-        // Release the lock and update latest_lock record.
-        dbLockService.releaseLock(lock, true);
-        lockReleased = true;
+      return result;
 
-        return result;
-      } else {
-        log.debug("Requested lock version is already the latest. Not calling service method.");
-        dbLockService.releaseLock(lock, false);
-        lockReleased = true;
-      }
     } catch (Exception e) {
       if (lock != null) {
         dbLockService.releaseLock(lock, false);
@@ -66,7 +62,6 @@ public class UsingClusterLockAnnotationAspect {
         dbLockService.releaseLock(lock, false);
       }
     }
-    return null;
   }
 
   private String resolveProperty(String value) {
@@ -84,17 +79,31 @@ public class UsingClusterLockAnnotationAspect {
   }
 
   private Object[] enrichFirstLockContextIfAny(
-      ProceedingJoinPoint joinPoint, AcquiredLock lock, String requestedVersion) {
+      ProceedingJoinPoint joinPoint,
+      AcquiredLock lock,
+      String requestedVersion,
+      long downgradeAllowedMillis) {
     Object[] methodArgs = joinPoint.getArgs();
     for (Object methodArg : methodArgs) {
       if (methodArg instanceof LockContext ctx) {
-        ctx.setLatestLock(new LatestLock(
-            lock.getPreviousLockVersion(), lock.getPreviousLockReleasedAt()));
+        ctx.setLatestLock(
+            new LatestLock(lock.getPreviousLockVersion(), lock.getPreviousLockReleasedAt()));
         ctx.setUpgrade(lock.isUpgradeRequired(requestedVersion));
+        ctx.setVersionChange(getVersionChange(lock, requestedVersion, downgradeAllowedMillis));
         ctx.setRequestedVersion(requestedVersion);
         break;
       }
     }
     return methodArgs;
+  }
+
+  private VersionChange getVersionChange(
+      AcquiredLock lock, String requestedVersion, long downgradeAllowedMillis) {
+    if (lock.isUpgradeRequired(requestedVersion)) {
+      return VersionChange.UPGRADE;
+    }
+    return lock.isDowngradeRequired(requestedVersion, downgradeAllowedMillis)
+        ? VersionChange.DOWNGRADE
+        : VersionChange.RETAIN;
   }
 }
