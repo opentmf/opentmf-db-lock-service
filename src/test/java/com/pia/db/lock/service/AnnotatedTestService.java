@@ -63,4 +63,9 @@ public class AnnotatedTestService {
   public LockContext taskWithContextArg(LockContext context) {
     return context;
   }
+
+  @UsingClusterLock(lockType = LockType.LOCK_Y, requestedVersion = "5.0", executeOnUnchangedVersion = true)
+  public LockContext taskWithUnchangedVersionFlagSetToTrue(LockContext context) {
+    return context;
+  }
 }

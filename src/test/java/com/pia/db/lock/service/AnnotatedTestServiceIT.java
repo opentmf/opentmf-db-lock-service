@@ -160,25 +160,32 @@ class AnnotatedTestServiceIT {
   }
 
   @Test
-  void testServiceUsingClusterLock_withSameVersionRequested_setVersionChangeToRetain() {
+  void testServiceUsingClusterLock_withSameVersionRequestedAndSameVersionFlagSetToFalse_doNothingReturnNull() {
     annotatedTestPersistenceService.deleteLocks(LockType.LOCK_Y);
     annotatedTestPersistenceService.insertLockLatest(LockType.LOCK_Y, "5.0", OffsetDateTime.now());
     LockContext context = this.annotatedTestService.taskWithContextArg(new LockContext());
-    Assertions.assertNotNull(context);
-    Assertions.assertEquals(VersionChange.RETAIN, context.getVersionChange());
+    Assertions.assertNull(context);
   }
 
   @Test
-  void testServiceUsingClusterLock_withLowerVersionRequestedAndDowngradeAllowedMillisecondsNotPassed_setVersionChangeToRetain() {
+  void testServiceUsingClusterLock_withSameVersionRequestedAndSameVersionFlagSetToTrue_executeMethodAndSetVersionChangeToNoChange() {
+    annotatedTestPersistenceService.deleteLocks(LockType.LOCK_Y);
+    annotatedTestPersistenceService.insertLockLatest(LockType.LOCK_Y, "5.0", OffsetDateTime.now());
+    LockContext context = this.annotatedTestService.taskWithUnchangedVersionFlagSetToTrue(new LockContext());
+    Assertions.assertNotNull(context);
+    Assertions.assertEquals(VersionChange.NO_CHANGE, context.getVersionChange());
+  }
+
+  @Test
+  void testServiceUsingClusterLock_withLowerVersionRequestedAndDowngradeAllowedMillisecondsNotPassed_doNothingReturnNull() {
     annotatedTestPersistenceService.deleteLocks(LockType.LOCK_Y);
     annotatedTestPersistenceService.insertLockLatest(LockType.LOCK_Y, "6.0", OffsetDateTime.now());
     LockContext context = this.annotatedTestService.taskWithContextArg(new LockContext());
-    Assertions.assertNotNull(context);
-    Assertions.assertEquals(VersionChange.RETAIN, context.getVersionChange());
+    Assertions.assertNull(context);
   }
 
   @Test
-  void testServiceUsingClusterLock_withLowerVersionRequestedAndDowngradeAllowedMillisecondsPassed_setVersionChangeToDowngrade() {
+  void testServiceUsingClusterLock_withLowerVersionRequestedAndDowngradeAllowedMillisecondsPassed_executeMethodAndSetVersionChangeToDowngrade() {
     annotatedTestPersistenceService.deleteLocks(LockType.LOCK_Y);
     annotatedTestPersistenceService.insertLockLatest(LockType.LOCK_Y, "6.0", OffsetDateTime.now().minusMinutes(15));
     LockContext context = this.annotatedTestService.taskWithContextArg(new LockContext());

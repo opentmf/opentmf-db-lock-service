@@ -39,17 +39,29 @@ public class UsingClusterLockAnnotationAspect {
     try {
       lock = dbLockService.acquireLock(usingClusterLock.lockType(), requestedVersion);
 
-      // Execute the actual business logic
-      Object result =
-          pjp.proceed(
-              enrichFirstLockContextIfAny(pjp, lock, requestedVersion, downgradeAllowedMillis));
+      VersionChange versionChange = lock.getVersionChange(requestedVersion);
 
-      // No exception from the service method means we have a successful completion.
-      // Release the lock and update latest_lock record.
-      dbLockService.releaseLock(lock, true);
-      lockReleased = true;
+      if (versionChange == VersionChange.UPGRADE
+          || (versionChange == VersionChange.NO_CHANGE
+              && usingClusterLock.executeOnUnchangedVersion())
+          || versionChange == VersionChange.DOWNGRADE
+              && lock.isDowngradeAllowed(downgradeAllowedMillis)) {
 
-      return result;
+        // Execute the actual business logic
+        Object result =
+            pjp.proceed(enrichFirstLockContextIfAny(pjp, lock, requestedVersion, versionChange));
+
+        // No exception from the service method means we have a successful completion.
+        // Release the lock and update latest_lock record.
+        dbLockService.releaseLock(lock, true);
+        lockReleased = true;
+
+        return result;
+      } else {
+        log.debug("Requested lock version is already the latest. Not calling service method.");
+        dbLockService.releaseLock(lock, false);
+        lockReleased = true;
+      }
 
     } catch (Exception e) {
       if (lock != null) {
@@ -62,6 +74,8 @@ public class UsingClusterLockAnnotationAspect {
         dbLockService.releaseLock(lock, false);
       }
     }
+
+    return null;
   }
 
   private String resolveProperty(String value) {
@@ -82,28 +96,18 @@ public class UsingClusterLockAnnotationAspect {
       ProceedingJoinPoint joinPoint,
       AcquiredLock lock,
       String requestedVersion,
-      long downgradeAllowedMillis) {
+      VersionChange versionChange) {
     Object[] methodArgs = joinPoint.getArgs();
     for (Object methodArg : methodArgs) {
       if (methodArg instanceof LockContext ctx) {
         ctx.setLatestLock(
             new LatestLock(lock.getPreviousLockVersion(), lock.getPreviousLockReleasedAt()));
-        ctx.setUpgrade(lock.isUpgradeRequired(requestedVersion));
-        ctx.setVersionChange(getVersionChange(lock, requestedVersion, downgradeAllowedMillis));
+        ctx.setUpgrade(versionChange == VersionChange.UPGRADE);
+        ctx.setVersionChange(versionChange);
         ctx.setRequestedVersion(requestedVersion);
         break;
       }
     }
     return methodArgs;
-  }
-
-  private VersionChange getVersionChange(
-      AcquiredLock lock, String requestedVersion, long downgradeAllowedMillis) {
-    if (lock.isUpgradeRequired(requestedVersion)) {
-      return VersionChange.UPGRADE;
-    }
-    return lock.isDowngradeRequired(requestedVersion, downgradeAllowedMillis)
-        ? VersionChange.DOWNGRADE
-        : VersionChange.RETAIN;
   }
 }

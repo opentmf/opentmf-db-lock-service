@@ -1,6 +1,5 @@
 package com.pia.db.lock.model;
 
-import com.pia.db.lock.annotation.UsingClusterLock;
 import lombok.Getter;
 import lombok.Setter;
 
@@ -16,7 +15,7 @@ public class LockContext {
   private LatestLock latestLock;
 
   /**
-   * <strong>true</strong>, if we are performing an upgrade, or <strong>false</strong> if
+   * <strong>true</strong>, if we are performing an upgrade, or <strong>false</strong> if a
    * downgrade.
    *
    * @deprecated use {@link #versionChange} instead.
@@ -25,17 +24,9 @@ public class LockContext {
   private boolean upgrade;
 
   /**
-   * Represents the version transition of the acquired lock.
+   * Represents the version change between the previous lock version and the requested version.
    *
-   * <p>The possible values are:
-   *
-   * <ul>
-   *   <li>{@link VersionChange#UPGRADE} - The requested version is higher than the lock version.
-   *   <li>{@link VersionChange#RETAIN} - The requested version and the lock version are the same or
-   *       requested version is lower than the lock version but it has not passed {@link
-   *       UsingClusterLock#downgradeAllowedMillis()} milliseconds until the last synchronization.
-   *   <li>{@link VersionChange#DOWNGRADE} - The requested version is lower than the lock version.
-   * </ul>
+   * @see AcquiredLock#getVersionChange
    */
   private VersionChange versionChange;
 
