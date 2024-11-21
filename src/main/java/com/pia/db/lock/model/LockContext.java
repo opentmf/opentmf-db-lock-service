@@ -3,26 +3,26 @@ package com.pia.db.lock.model;
 import lombok.Getter;
 import lombok.Setter;
 
+/**
+ * @author Abdullah Beker
+ */
 @Getter
 @Setter
 public class LockContext {
 
   /**
-   * The latest successfully performed lock details.
-   *
-   * @see LatestLock
+   * The resolved value of the <code>requestedVersion</code> parameter of <code>@UsingClusterLock
+   * </code>.
+   */
+  private String requestedVersion;
+
+  /**
+   * The latest successfully performed lock details. Can be NULL if no previous lock exists.
    */
   private LatestLock latestLock;
 
   /**
-   * <strong>true</strong>, if we are performing an upgrade, or <strong>false</strong> if
-   * downgrade.
+   * Represents the version transition between the previous lock version and the requested version.
    */
-  private boolean upgrade;
-
-  /**
-   * The resolved value of the <code>requestedVersion</code> parameter of
-   * <code>@UsingClusterLock</code>.
-   */
-  private String requestedVersion;
+  private VersionTransition versionTransition;
 }

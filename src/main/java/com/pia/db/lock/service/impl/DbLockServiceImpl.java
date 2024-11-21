@@ -2,13 +2,13 @@ package com.pia.db.lock.service.impl;
 
 
 import com.pia.db.lock.config.DbLockProperties;
+import com.pia.db.lock.exception.DbLockException;
+import com.pia.db.lock.exception.DbLockTimeoutException;
 import com.pia.db.lock.model.AcquiredLock;
 import com.pia.db.lock.model.LatestLock;
 import com.pia.db.lock.model.LockType;
-import com.pia.db.lock.util.JdbcHelper;
-import com.pia.db.lock.exception.DbLockException;
-import com.pia.db.lock.exception.DbLockTimeoutException;
 import com.pia.db.lock.service.api.DbLockService;
+import com.pia.db.lock.util.JdbcHelper;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.sql.Connection;
@@ -20,7 +20,6 @@ import java.util.Iterator;
 import java.util.Map;
 import java.util.Timer;
 import java.util.TimerTask;
-
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.DisposableBean;
@@ -75,7 +74,7 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
     try {
       conn = JdbcHelper.getConnection(jdbcTemplate);
       int lockId = lock(conn, lockType, lockVersion);
-      AcquiredLock acquiredLock = getLockDetails(conn, lockId, lockType);
+      AcquiredLock acquiredLock = getLockDetails(conn, lockId, lockType, lockVersion);
       JdbcHelper.commit(conn);
       createLockReleaseTimer(acquiredLock);
       log.debug("Acquired lock id = {} for lockType = {}, and lockVersion = {}.",
@@ -164,12 +163,11 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
     }
   }
 
-  private AcquiredLock getLockDetails(Connection conn, int lockId, LockType lockType)
+  private AcquiredLock getLockDetails(Connection conn, int lockId, LockType lockType, String lockVersion)
       throws SQLException {
     LatestLock latestLock = JdbcHelper.getLatestLock(conn, SQL_GET_LATEST_LOCK,
         lockType.getDbValue());
-    return new AcquiredLock(lockId, lockType, 
-        latestLock.getLockVersion(), latestLock.getLockReleasedAt());
+    return AcquiredLock.of(lockId, lockType, lockVersion, latestLock);
   }
 
   private void deleteLockRecordIfExists(Connection conn, AcquiredLock lock)
@@ -224,6 +222,7 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
   @Override
   public void destroy() {
     log.info("Destroying DbLockService");
+    // do not change iterator usage with enhanced for. GD.
     for (Iterator<AcquiredLock> iterator = timerMap.keySet().iterator(); iterator.hasNext();) {
       var acquiredLock = iterator.next();
       log.warn("Releasing still active {}", acquiredLock);

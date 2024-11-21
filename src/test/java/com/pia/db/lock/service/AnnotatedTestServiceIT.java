@@ -4,6 +4,7 @@ import com.pia.db.lock.config.TestProperties;
 import com.pia.db.lock.exception.DbLockException;
 import com.pia.db.lock.model.LockContext;
 import com.pia.db.lock.model.LockType;
+import com.pia.db.lock.model.VersionTransition;
 import java.lang.reflect.UndeclaredThrowableException;
 import java.time.OffsetDateTime;
 import org.junit.jupiter.api.Assertions;
@@ -92,17 +93,6 @@ class AnnotatedTestServiceIT {
   }
 
   @Test
-  void testServiceUsingClusterLock_withNoUpgradeRequired_doNothingReturnNull() {
-    annotatedTestPersistenceService.deleteLocks(LockType.LOCK_Z);
-    var initialCount = annotatedTestPersistenceService.historyCount(LockType.LOCK_Z);
-    annotatedTestPersistenceService.insertLockLatest(LockType.LOCK_Z, "3.0", OffsetDateTime.now());
-    String s = annotatedTestService.taskThree();
-    Assertions.assertNull(s);
-    Assertions.assertEquals(
-        initialCount + 1, annotatedTestPersistenceService.historyCount(LockType.LOCK_Z));
-  }
-
-  @Test
   void testServiceUsingClusterLock_withCorruptedPropertyFormat_doesNothingThrowsException() {
     annotatedTestPersistenceService.deleteLocks(LockType.LOCK_Z);
     Exception exception =
@@ -133,7 +123,8 @@ class AnnotatedTestServiceIT {
   }
 
   @Test
-  void testServiceUsingClusterLock_withCustomArgAndContextArg_passCustomArgAndContextArgToActualMethod() {
+  void
+      testServiceUsingClusterLock_withCustomArgAndContextArg_passCustomArgAndContextArgToActualMethod() {
     annotatedTestPersistenceService.deleteLocks(LockType.LOCK_Y);
     annotatedTestPersistenceService.insertLockLatest(LockType.LOCK_Y, "4.0", OffsetDateTime.now());
     String arg = "lock_y";
@@ -156,5 +147,48 @@ class AnnotatedTestServiceIT {
     annotatedTestPersistenceService.deleteLocks(LockType.LOCK_Y);
     LockContext context = this.annotatedTestService.taskWithContextArg(null);
     Assertions.assertNull(context);
+  }
+
+  @Test
+  void testServiceUsingClusterLock_withGreaterVersionRequested_setVersionChangeToUpgrade() {
+    annotatedTestPersistenceService.deleteLocks(LockType.LOCK_Y);
+    annotatedTestPersistenceService.insertLockLatest(LockType.LOCK_Y, "4.0", OffsetDateTime.now());
+    LockContext context = this.annotatedTestService.taskWithContextArg(new LockContext());
+    Assertions.assertNotNull(context);
+    Assertions.assertEquals(VersionTransition.UPGRADE, context.getVersionTransition());
+  }
+
+  @Test
+  void testServiceUsingClusterLock_withSameVersionRequestedAndSameVersionFlagSetToFalse_doNothingReturnNull() {
+    annotatedTestPersistenceService.deleteLocks(LockType.LOCK_Y);
+    annotatedTestPersistenceService.insertLockLatest(LockType.LOCK_Y, "5.0", OffsetDateTime.now());
+    LockContext context = this.annotatedTestService.taskWithContextArg(new LockContext());
+    Assertions.assertNull(context);
+  }
+
+  @Test
+  void testServiceUsingClusterLock_withSameVersionRequestedAndSameVersionFlagSetToTrue_executeMethodAndSetVersionChangeToNoChange() {
+    annotatedTestPersistenceService.deleteLocks(LockType.LOCK_Y);
+    annotatedTestPersistenceService.insertLockLatest(LockType.LOCK_Y, "5.0", OffsetDateTime.now());
+    LockContext context = this.annotatedTestService.taskWithUnchangedVersionFlagSetToTrue(new LockContext());
+    Assertions.assertNotNull(context);
+    Assertions.assertEquals(VersionTransition.NO_CHANGE, context.getVersionTransition());
+  }
+
+  @Test
+  void testServiceUsingClusterLock_withLowerVersionRequestedAndDowngradeAllowedMillisecondsNotPassed_doNothingReturnNull() {
+    annotatedTestPersistenceService.deleteLocks(LockType.LOCK_Y);
+    annotatedTestPersistenceService.insertLockLatest(LockType.LOCK_Y, "6.0", OffsetDateTime.now());
+    LockContext context = this.annotatedTestService.taskWithContextArg(new LockContext());
+    Assertions.assertNull(context);
+  }
+
+  @Test
+  void testServiceUsingClusterLock_withLowerVersionRequestedAndDowngradeAllowedMillisecondsPassed_executeMethodAndSetVersionChangeToDowngrade() {
+    annotatedTestPersistenceService.deleteLocks(LockType.LOCK_Y);
+    annotatedTestPersistenceService.insertLockLatest(LockType.LOCK_Y, "6.0", OffsetDateTime.now().minusMinutes(15));
+    LockContext context = this.annotatedTestService.taskWithContextArg(new LockContext());
+    Assertions.assertNotNull(context);
+    Assertions.assertEquals(VersionTransition.DOWNGRADE, context.getVersionTransition());
   }
 }

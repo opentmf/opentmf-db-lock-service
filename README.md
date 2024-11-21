@@ -82,21 +82,20 @@ This code will cause the following:
 - A lock will be acquired for lockType = X
 - If the lock cannot be acquired within the configured duration or attempts:
   - Then the service method will not be executed.
-- If the acquired lock's version is the same as the requested version:
-  - Then the service method will not be executed.
 - Else:
   - If one of the following conditions are met:
     - no previous lock of that lockType exists,
-    - previous lock version is smaller than the requested
+    - previous lock version is lower than the requested
+    - previous lock version is equal to the requested and `executeOnUnchangedVersion` flag is set to true
     - previous lock version is greater than the requested and the `downgradeAllowedMillis` duration is met (i.e. rollback is applicable)
   - Then the service method will be executed.
   - Otherwise, the service method will NOT be executed.
 - And finally, the acquired lock will be released.
-  - If the service method was executed and successful, the `db_lock_latest` record will be updated. 
+  - If the service method was executed and successful, the `db_lock_latest` record will be updated.
 
-If you need the details of lock in your service methods, you can add a parameter with `LockContext` type in your methods, then `@UsingClusterLock` will inject the lock details into this new parameter. When calling your service methods in other services, you can initialize a new `LockContext` object and pass it to your method, or you can pass null and `@UsingClusterLock` will initialize a new instance. 
+If you need the details of lock in your service methods, you can add a parameter with `LockContext` type in your methods, then `@UsingClusterLock` will inject the lock details into this new parameter. When calling your service methods in other services, you need to initialize a new `LockContext` object and pass it to the method.
 
-There is a special record class called `LockContext`. If `LockContext` is included in the parameter list of your service method, its fields will automatically be set. Here is the contents of the `LockContext` record:
+Below is the properties of `LockContext` class:
 ```java
 @Getter
 @Setter
@@ -110,20 +109,30 @@ public class LockContext {
   private LatestLock latestLock;
 
   /**
-   * <strong>true</strong>, if we are performing an upgrade, or <strong>false</strong> if
+   * <strong>true</strong>, if we are performing an upgrade, or <strong>false</strong> if a
    * downgrade.
+   *
+   * @deprecated use {@link #versionTransition} instead.
    */
+  @Deprecated(since = "1.0.5", forRemoval = true)
   private boolean upgrade;
 
   /**
-   * The resolved value of the <code>requestedVersion</code> parameter of
-   * <code>@UsingClusterLock</code>.
+   * Represents the version change between the previous lock version and the requested version.
+   *
+   * @see AcquiredLock#getVersionChange
+   */
+  private VersionChange versionTransition;
+
+  /**
+   * The resolved value of the <code>requestedVersion</code> parameter of <code>@UsingClusterLock
+   * </code>.
    */
   private String requestedVersion;
 }
 
 ```
-And here is the contents of the LatestLock class:
+And below is the contents of the `LatestLock` class:
 ```java
 /**
  * The latest successfully performed lock's details.
@@ -149,6 +158,8 @@ public class LatestLock {
 An example of reaching the attributes of the LockContext inside the service method implementation that contains a LockContext parameter:
 
 ```java
+import com.pia.db.lock.model.VersionTransition;
+
 @Slf4j
 @Service
 public class SomeServiceImpl implements SomeService {
@@ -157,18 +168,20 @@ public class SomeServiceImpl implements SomeService {
   public void performTask(String arg1, LockContext ctx, Long arg2) {
 
     // log resolved requestedLock version string
-    log.debug("Requested lock version: {}, previous lock: {}", 
-      ctx.getRequestedVersion(), ctx.getLatestLock());
+    log.debug("Requested lock version: {}, previous lock: {}",
+            ctx.getRequestedVersion(), ctx.getLatestLock());
 
-    if (ctx.isUpgrade()) {
-      log.debug("Performing upgrade.");
-    } else {
-      log.debug("Performing downgrade.");
+    if (ctx.getVersionChange() == VersionTransition.UPGRADE) {
+      log.debug(
+              "There is no previous lock version or the requested version is higher than the previous lock version. Do upgrade.");
+    } else if (ctx.getVersionChange() == VersionTransition.DOWNGRADE) {
+      log.debug(
+              "The requested version is lower than the previous lock version and it has passed enough milliseconds for downgrade. Do downgrade.");
     }
   }
 }
 ```
-You can call the above method in other services like the following:
+You can call above method in other services as below;
 
 ```java
 @RestController
@@ -179,6 +192,31 @@ public class SomeOtherServiceImpl implements SomeOtherService {
 
   public void performTask() {
     someService.performTask("test", new LockContext(), 4L);
+  }
+}
+```
+
+If you want your service method to be executed even if the previous lock version and requested version are the same, you can set the `executeOnUnchangedVersion` flag to true in the `@UsingClusterLock` annotation.
+
+```java
+import com.pia.db.lock.model.VersionTransition;
+
+@Slf4j
+@Service
+public class SomeServiceImpl implements SomeService {
+
+  @UsingClusterLock(lockType = LockType.LOCK_X, requestedVersion = "${test.properties.version}", executeOnUnchangedVersion = true)
+  public void performTask(LockContext ctx) {
+
+    if (ctx.getVersionChange() == VersionTransition.UPGRADE) {
+      log.debug(
+              "There is no previous lock version or the requested version is higher than the previous lock version. Do upgrade.");
+    } else if (ctx.getVersionChange() == VersionTransition.DOWNGRADE) {
+      log.debug(
+              "The requested version is lower than the previous lock version and it has passed enough milliseconds for downgrade. Do downgrade.");
+    } else if (ctx.getVersionChange() == VersionTransition.NO_CHANGE) {
+      log.debug("The requested version is the same as the previous lock version.");
+    }
   }
 }
 ```
@@ -194,3 +232,8 @@ public class SomeOtherServiceImpl implements SomeOtherService {
 - Adds support for `LockContext` parameter in methods annotated with `@UsingClusterLock` to retrieve lock details.
 ### 1.0.4
 - Updates dependent library versions to their latest.
+### 1.0.5
+- Updates execution logic of `@UsingClusterLock`, adds `executeOnUnchangedVersion` flag to be able to execute the service method even if the lock version is not changed.
+- Introduces `VersionChange` enum to represent a version transition between two versions.
+- Updates the `LockContext` class, adds `versionTransition` attribute and deprecates `upgrade` field.
+- Updates `AcquiredLock` class, adds new methods to calculate the version change and to check if downgrade is allowed. Deprecates existing methods.

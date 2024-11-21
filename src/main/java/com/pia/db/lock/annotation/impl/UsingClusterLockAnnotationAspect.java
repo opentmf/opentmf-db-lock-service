@@ -2,7 +2,6 @@ package com.pia.db.lock.annotation.impl;
 
 import com.pia.db.lock.annotation.UsingClusterLock;
 import com.pia.db.lock.model.AcquiredLock;
-import com.pia.db.lock.model.LatestLock;
 import com.pia.db.lock.model.LockContext;
 import com.pia.db.lock.service.api.DbLockService;
 import lombok.RequiredArgsConstructor;
@@ -38,11 +37,12 @@ public class UsingClusterLockAnnotationAspect {
     try {
       lock = dbLockService.acquireLock(usingClusterLock.lockType(), requestedVersion);
 
-      if (lock.isUpgradeRequired(requestedVersion)
-          || lock.isDowngradeRequired(requestedVersion, downgradeAllowedMillis)) {
+      if (lock.isUpgrade() ||
+          (lock.isDowngrade() && lock.isDowngradeAllowed(downgradeAllowedMillis)) ||
+          (lock.isSameVersion() && usingClusterLock.executeOnSameVersion())) {
 
         // Execute the actual business logic
-        Object result = pjp.proceed(enrichFirstLockContextIfAny(pjp, lock, requestedVersion));
+        Object result = pjp.proceed(enrichFirstLockContextIfAny(pjp, lock));
 
         // No exception from the service method means we have a successful completion.
         // Release the lock and update latest_lock record.
@@ -55,6 +55,7 @@ public class UsingClusterLockAnnotationAspect {
         dbLockService.releaseLock(lock, false);
         lockReleased = true;
       }
+
     } catch (Exception e) {
       if (lock != null) {
         dbLockService.releaseLock(lock, false);
@@ -83,15 +84,13 @@ public class UsingClusterLockAnnotationAspect {
     return value.substring(2, value.length() - 1).trim();
   }
 
-  private Object[] enrichFirstLockContextIfAny(
-      ProceedingJoinPoint joinPoint, AcquiredLock lock, String requestedVersion) {
+  private Object[] enrichFirstLockContextIfAny(ProceedingJoinPoint joinPoint, AcquiredLock lock) {
     Object[] methodArgs = joinPoint.getArgs();
     for (Object methodArg : methodArgs) {
       if (methodArg instanceof LockContext ctx) {
-        ctx.setLatestLock(new LatestLock(
-            lock.getPreviousLockVersion(), lock.getPreviousLockReleasedAt()));
-        ctx.setUpgrade(lock.isUpgradeRequired(requestedVersion));
-        ctx.setRequestedVersion(requestedVersion);
+        ctx.setLatestLock(lock.getPreviousLock());
+        ctx.setVersionTransition(lock.getVersionTransition());
+        ctx.setRequestedVersion(lock.getLockVersion());
         break;
       }
     }

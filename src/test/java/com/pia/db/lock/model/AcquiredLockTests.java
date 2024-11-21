@@ -2,8 +2,6 @@ package com.pia.db.lock.model;
 
 import static org.awaitility.Awaitility.await;
 
-import com.pia.db.lock.model.AcquiredLock;
-import com.pia.db.lock.model.LockType;
 import java.time.OffsetDateTime;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Assertions;
@@ -18,25 +16,28 @@ class AcquiredLockTests {
 
   private static final long TIMEOUT = 2000L;
 
+  private static final LatestLock LATEST_LOCK = new LatestLock("1.1", OffsetDateTime.now());
+
   @Test
   void test_downgradeShouldBeAllowed_withinTheAllowedTime() {
-    AcquiredLock lock = new AcquiredLock(1, LockType.BPMN, "2.0", OffsetDateTime.now());
+    AcquiredLock lock = AcquiredLock.of(1, LockType.BPMN, "1.0", LATEST_LOCK);
     await()
         .atMost(3, TimeUnit.SECONDS)
         .pollInterval(300, TimeUnit.MILLISECONDS)
-        .until(() -> downgradeAllowed(lock));
+        .until(() -> downgradeIsAllowed(lock));
   }
-
-  private static final AcquiredLock LOCK =
-      new AcquiredLock(1, LockType.BPMN, "1.1", OffsetDateTime.now());
 
   @ParameterizedTest
   @ValueSource(strings = {"1.0", "1.1"})
   void test_upgradeShouldBePrevented_forSameOrOlderVersion(String requestedVersion) {
-    Assertions.assertFalse(LOCK.isUpgradeRequired(requestedVersion));
+    Assertions.assertFalse(acquiredLock(requestedVersion).isUpgrade());
   }
 
-  private boolean downgradeAllowed(AcquiredLock lock) {
-    return lock.isDowngradeRequired("1.0", TIMEOUT);
+  private boolean downgradeIsAllowed(AcquiredLock lock) {
+    return lock.isDowngrade() && lock.isDowngradeAllowed(TIMEOUT);
+  }
+
+  private AcquiredLock acquiredLock(String version) {
+    return AcquiredLock.of(1, LockType.LOCK_X, version, LATEST_LOCK);
   }
 }
