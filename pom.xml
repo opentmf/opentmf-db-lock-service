@@ -8,7 +8,7 @@
     </parent>
     <groupId>com.pia.commons</groupId>
     <artifactId>pia-db-lock-service</artifactId>
-    <version>1.0.5-SNAPSHOT</version>
+    <version>1.0.5</version>
 
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
@@ -248,7 +248,7 @@
     <scm>
         <connection>scm:git:git@github.com:pia-commons/pia-db-lock-service.git</connection>
         <developerConnection>scm:git:git@github.com:pia-commons/pia-db-lock-service.git</developerConnection>
-        <tag>HEAD</tag>
+        <tag>pia-db-lock-service-1.0.5</tag>
     </scm>
 
     <distributionManagement>
