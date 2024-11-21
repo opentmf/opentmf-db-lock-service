@@ -233,7 +233,8 @@ public class SomeServiceImpl implements SomeService {
 ### 1.0.4
 - Updates dependent library versions to their latest.
 ### 1.0.5
-- Updates execution logic of `@UsingClusterLock`, adds `executeOnUnchangedVersion` flag to be able to execute the service method even if the lock version is not changed.
-- Introduces `VersionChange` enum to represent a version transition between two versions.
-- Updates the `LockContext` class, adds `versionTransition` attribute and deprecates `upgrade` field.
-- Updates `AcquiredLock` class, adds new methods to calculate the version change and to check if downgrade is allowed. Deprecates existing methods.
+- **Heads Up**: Backward Incompatible version.
+- Updates execution logic of `@UsingClusterLock`, adds `executeOnSameVersion` flag to be able to execute the service method even if the lock version is not changed.
+- Introduces `VersionTransition` enum to represent a version transition between two versions.
+- Updates the `LockContext` class, adds `versionTransition` attribute and removes `upgrade` field.
+- Updates `AcquiredLock` class, adds new methods to calculate the version change and to check if downgrade is allowed. Removes methods taking lockVersion as a parameter, since now AcquiredLock also contains this information.
