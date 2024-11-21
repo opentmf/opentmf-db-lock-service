@@ -104,7 +104,7 @@ public final class JdbcHelper {
     }
   }
 
-  public static @NonNull LatestLock getLatestLock(Connection conn, String sql, String param)
+  public static LatestLock getLatestLock(Connection conn, String sql, String param)
       throws SQLException {
     try (PreparedStatement ps = conn.prepareStatement(sql)) {
       ps.setString(1, param);
@@ -112,7 +112,7 @@ public final class JdbcHelper {
       ResultSet rs = ps.executeQuery();
       return rs.next()
           ? new LatestLock(rs.getString(1), rs.getObject(2, OffsetDateTime.class))
-          : new LatestLock(null, null);
+          : null;
     }
   }
 

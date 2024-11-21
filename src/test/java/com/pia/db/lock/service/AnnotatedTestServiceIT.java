@@ -4,10 +4,9 @@ import com.pia.db.lock.config.TestProperties;
 import com.pia.db.lock.exception.DbLockException;
 import com.pia.db.lock.model.LockContext;
 import com.pia.db.lock.model.LockType;
+import com.pia.db.lock.model.VersionTransition;
 import java.lang.reflect.UndeclaredThrowableException;
 import java.time.OffsetDateTime;
-
-import com.pia.db.lock.model.VersionChange;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -156,7 +155,7 @@ class AnnotatedTestServiceIT {
     annotatedTestPersistenceService.insertLockLatest(LockType.LOCK_Y, "4.0", OffsetDateTime.now());
     LockContext context = this.annotatedTestService.taskWithContextArg(new LockContext());
     Assertions.assertNotNull(context);
-    Assertions.assertEquals(VersionChange.UPGRADE, context.getVersionChange());
+    Assertions.assertEquals(VersionTransition.UPGRADE, context.getVersionTransition());
   }
 
   @Test
@@ -173,7 +172,7 @@ class AnnotatedTestServiceIT {
     annotatedTestPersistenceService.insertLockLatest(LockType.LOCK_Y, "5.0", OffsetDateTime.now());
     LockContext context = this.annotatedTestService.taskWithUnchangedVersionFlagSetToTrue(new LockContext());
     Assertions.assertNotNull(context);
-    Assertions.assertEquals(VersionChange.NO_CHANGE, context.getVersionChange());
+    Assertions.assertEquals(VersionTransition.NO_CHANGE, context.getVersionTransition());
   }
 
   @Test
@@ -190,6 +189,6 @@ class AnnotatedTestServiceIT {
     annotatedTestPersistenceService.insertLockLatest(LockType.LOCK_Y, "6.0", OffsetDateTime.now().minusMinutes(15));
     LockContext context = this.annotatedTestService.taskWithContextArg(new LockContext());
     Assertions.assertNotNull(context);
-    Assertions.assertEquals(VersionChange.DOWNGRADE, context.getVersionChange());
+    Assertions.assertEquals(VersionTransition.DOWNGRADE, context.getVersionTransition());
   }
 }

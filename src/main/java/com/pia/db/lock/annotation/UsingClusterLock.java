@@ -3,7 +3,6 @@ package com.pia.db.lock.annotation;
 import com.pia.db.lock.model.AcquiredLock;
 import com.pia.db.lock.model.LockType;
 import com.pia.db.lock.service.api.DbLockService;
-
 import java.lang.annotation.ElementType;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
@@ -47,5 +46,5 @@ public @interface UsingClusterLock {
    * When set to <b>true</b> also executes the annotated method if the requested version is the same
    * with the previous lock version. Default value is false.
    */
-  boolean executeOnUnchangedVersion() default false;
+  boolean executeOnSameVersion() default false;
 }
