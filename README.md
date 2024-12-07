@@ -36,6 +36,29 @@ The timeout values are in milliseconds and the above table contains the default 
 
 Similarly, create-tables property is true by default, which causes the required tables to be created automatically at the application start, if they not already exist. The creation script is for PostgreSQL. However, to use the library with other database vendors, it is possible to set this property to false and create the tables through your application mechanism, for example manually, or with the help of liquibase.
 
+Starting from version 1.0.6, you can override the lock-acquire-poll-interval, lock-acquire-timeout and lock-hold-timeout values per supported lock type.
+
+For example, if you want to override the default values for the particular lock type = LOCK_X and LOCK_Y you can define the following properties:
+
+```yaml
+pia:
+    db-lock:
+      create-tables: true
+      lock-acquire-poll-interval: 1000
+      lock-acquire-timeout: 120000
+      lock-hold-timeout: 300000
+      duration-overrides:
+        lock-x:
+          lock-acquire-poll-interval: 100
+          lock-acquire-timeout: 1000
+          lock-hold-timeout: 2000
+        lock-y:
+          lock-acquire-poll-interval: 200
+          lock-acquire-timeout: 2000
+          lock-hold-timeout: 4000
+ ```
+If an overridden duration is not specified for a particular lock type, then the default values are used, which pertains the old behaviour. 
+
 ## Usage
 The pia-db-lock-library is automatically included from pia-bpmn-sync-service and pia-catalog-sync-service. Therefore, there is no need to include a dependency to it, if the client uses one of the mentioned libraries.
 
@@ -86,7 +109,7 @@ This code will cause the following:
   - If one of the following conditions are met:
     - no previous lock of that lockType exists,
     - previous lock version is lower than the requested
-    - previous lock version is equal to the requested and `executeOnUnchangedVersion` flag is set to true
+    - previous lock version is equal to the requested and `executeOnSameVersion` flag is set to true
     - previous lock version is greater than the requested and the `downgradeAllowedMillis` duration is met (i.e. rollback is applicable)
   - Then the service method will be executed.
   - Otherwise, the service method will NOT be executed.
@@ -95,40 +118,74 @@ This code will cause the following:
 
 If you need the details of lock in your service methods, you can add a parameter with `LockContext` type in your methods, then `@UsingClusterLock` will inject the lock details into this new parameter. When calling your service methods in other services, you need to initialize a new `LockContext` object and pass it to the method.
 
-Below is the properties of `LockContext` class:
+Below is the `LockContext` class:
 ```java
 @Getter
 @Setter
 public class LockContext {
 
   /**
-   * The latest successfully performed lock details.
-   *
-   * @see LatestLock
-   */
-  private LatestLock latestLock;
-
-  /**
-   * <strong>true</strong>, if we are performing an upgrade, or <strong>false</strong> if a
-   * downgrade.
-   *
-   * @deprecated use {@link #versionTransition} instead.
-   */
-  @Deprecated(since = "1.0.5", forRemoval = true)
-  private boolean upgrade;
-
-  /**
-   * Represents the version change between the previous lock version and the requested version.
-   *
-   * @see AcquiredLock#getVersionChange
-   */
-  private VersionChange versionTransition;
-
-  /**
    * The resolved value of the <code>requestedVersion</code> parameter of <code>@UsingClusterLock
    * </code>.
    */
   private String requestedVersion;
+
+  /**
+   * The latest successfully performed lock details. Can be NULL if no previous lock exists.
+   */
+  private LatestLock latestLock;
+
+  /**
+   * Represents the version transition between the previous lock version and the requested version.
+   */
+  private VersionTransition versionTransition;
+
+  /**
+   * Returns true if this is the initial lock that we have acquired, false otherwise.
+   * @return true if this is the initial lock that we have acquired, false otherwise.
+   */
+  public boolean isInitial() {
+    return latestLock == null;
+  }
+
+  /**
+   * Returns true is this is an upgrade.
+   * <p>
+   * An upgrade means, either there is no successfully executed previous lock, or the current
+   * requested lock version is greater than the previous successful lock.
+   * </p>
+   *
+   * @return true is this is an upgrade, false otherwise.
+   */
+  public boolean isUpgrade() {
+    return versionTransition == VersionTransition.UPGRADE;
+  }
+
+  /**
+   * Returns true is this is a downgrade and this downgrade is allowed to be executed.
+   * <p>
+   * A downgrade which means the requested version is saller than the latest successfully completed
+   * version and the downgradeAllowedMillis has been reached. So we must be going for a downgrade.
+   * </p>
+   *
+   * @return Returns true is this is a downgrade and this downgrade is allowed to be executed, false
+   * otherwise.
+   */
+  public boolean isDowngrade() {
+    return versionTransition == VersionTransition.DOWNGRADE;
+  }
+
+  /**
+   * Returns true if the requested and obtained lock version is the same as the latest successfully
+   * executed lock version. There can be cases where a business logic must be executed each time a
+   * lock is obtained, even though it is the same as the latest lock version.
+   *
+   * @return true if the requested and obtained lock version is the same as the latest successfully
+   * * executed lock version, false otherwise.
+   */
+  public boolean isSameVersion() {
+    return versionTransition == VersionTransition.SAME_VERSION;
+  }
 }
 
 ```
@@ -158,8 +215,6 @@ public class LatestLock {
 An example of reaching the attributes of the LockContext inside the service method implementation that contains a LockContext parameter:
 
 ```java
-import com.pia.db.lock.model.VersionTransition;
-
 @Slf4j
 @Service
 public class SomeServiceImpl implements SomeService {
@@ -170,13 +225,11 @@ public class SomeServiceImpl implements SomeService {
     // log resolved requestedLock version string
     log.debug("Requested lock version: {}, previous lock: {}",
             ctx.getRequestedVersion(), ctx.getLatestLock());
-
-    if (ctx.getVersionChange() == VersionTransition.UPGRADE) {
-      log.debug(
-              "There is no previous lock version or the requested version is higher than the previous lock version. Do upgrade.");
-    } else if (ctx.getVersionChange() == VersionTransition.DOWNGRADE) {
-      log.debug(
-              "The requested version is lower than the previous lock version and it has passed enough milliseconds for downgrade. Do downgrade.");
+    
+    if (ctx.isInitial()) {
+      // POST
+    } else {
+      // PATCH
     }
   }
 }
@@ -196,7 +249,7 @@ public class SomeOtherServiceImpl implements SomeOtherService {
 }
 ```
 
-If you want your service method to be executed even if the previous lock version and requested version are the same, you can set the `executeOnUnchangedVersion` flag to true in the `@UsingClusterLock` annotation.
+If you want your service method to be executed even if the previous lock version and requested version are the same, you can set the `executeOnSameVersion` flag to true in the `@UsingClusterLock` annotation.
 
 ```java
 import com.pia.db.lock.model.VersionTransition;
@@ -205,17 +258,28 @@ import com.pia.db.lock.model.VersionTransition;
 @Service
 public class SomeServiceImpl implements SomeService {
 
-  @UsingClusterLock(lockType = LockType.LOCK_X, requestedVersion = "${test.properties.version}", executeOnUnchangedVersion = true)
+  @UsingClusterLock(
+      lockType = LockType.LOCK_X, 
+      requestedVersion = "${test.properties.version}",
+      executeOnSameVersion = true)
   public void performTask(LockContext ctx) {
 
-    if (ctx.getVersionChange() == VersionTransition.UPGRADE) {
-      log.debug(
-              "There is no previous lock version or the requested version is higher than the previous lock version. Do upgrade.");
-    } else if (ctx.getVersionChange() == VersionTransition.DOWNGRADE) {
-      log.debug(
-              "The requested version is lower than the previous lock version and it has passed enough milliseconds for downgrade. Do downgrade.");
-    } else if (ctx.getVersionChange() == VersionTransition.NO_CHANGE) {
-      log.debug("The requested version is the same as the previous lock version.");
+    if (ctx.isInitial()) {
+      log.debug("This is the initial obtained lock for the requested lock type. 
+          + "Perform the initial tasks.");
+
+    } else if (ctx.isUpgrade()) {
+        log.debug("The requested version is higher than the previous lock version."
+                + "Do the upgrade.");
+      
+    } else if (ctx.isDowngrade()) {
+      log.debug("The requested version is lower than the previous lock version " 
+              + "and enough milliseconds has already passed to allow a downgrade. " 
+              + "Do the downgrade.");
+
+    } else if (ctx.isSameVersion()) {
+      log.debug("The requested version is the same as the previous lock version." 
+              + "Do whatever you need to do within the obtained lock");
     }
   }
 }
@@ -238,3 +302,6 @@ public class SomeServiceImpl implements SomeService {
 - Introduces `VersionTransition` enum to represent a version transition between two versions.
 - Updates the `LockContext` class, adds `versionTransition` attribute and removes `upgrade` field.
 - Updates `AcquiredLock` class, adds new methods to calculate the version change and to check if downgrade is allowed. Removes methods taking lockVersion as a parameter, since now AcquiredLock also contains this information.
+### 1.0.6
+- **Enhancement**: You can now override lockAcquirePollInterval, lockAcquireTimeout and lockHoldTimeout per supported lockType.
+- Updates Spring Boot to version 3.4.0

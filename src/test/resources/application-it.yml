@@ -1,3 +1,16 @@
 test:
   properties:
     version1: 1.0
+
+
+pia:
+  db-lock:
+    duration-overrides:
+      lock-x:
+        lock-acquire-poll-interval: 100
+        lock-acquire-timeout: 1000
+        lock-hold-timeout: 2000
+      lock-y:
+        lock-acquire-poll-interval: 100
+        lock-acquire-timeout: 1000
+        lock-hold-timeout: 2000

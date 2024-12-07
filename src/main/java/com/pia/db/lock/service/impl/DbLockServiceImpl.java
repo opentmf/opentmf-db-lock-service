@@ -8,6 +8,7 @@ import com.pia.db.lock.model.AcquiredLock;
 import com.pia.db.lock.model.LatestLock;
 import com.pia.db.lock.model.LockType;
 import com.pia.db.lock.service.api.DbLockService;
+import com.pia.db.lock.util.DurationHelper;
 import com.pia.db.lock.util.JdbcHelper;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
@@ -29,12 +30,16 @@ import org.springframework.transaction.annotation.Transactional;
 /**
  * @author Gokhan Demir
  */
-@RequiredArgsConstructor
 @Slf4j
 public class DbLockServiceImpl implements DbLockService, DisposableBean {
 
   private final JdbcTemplate jdbcTemplate;
-  private final DbLockProperties dbLockProperties;
+  private final DurationHelper lockHelper;
+
+  public DbLockServiceImpl(JdbcTemplate jdbcTemplate, DbLockProperties dbLockProperties) {
+    this.jdbcTemplate = jdbcTemplate;
+    lockHelper = new DurationHelper(dbLockProperties);
+  }
 
   private final Map<AcquiredLock, Timer> timerMap = new HashMap<>();
 
@@ -119,21 +124,21 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
       } catch (SQLException e) {
         log.warn("errorCode: {}, sqlState: {}, description: {}", e.getErrorCode(), e.getSQLState(),
             e.getMessage());
-        if ((System.currentTimeMillis() - t0) > dbLockProperties.getLockAcquireTimeout()) {
+        if ((System.currentTimeMillis() - t0) > lockHelper.getLockAcquireTimeout(lockType)) {
           String message = String.format("Cannot acquire DB Lock for %s within the configured " +
-              "%d millis. Giving up.", lockType, dbLockProperties.getLockAcquireTimeout());
+              "%d millis. Giving up.", lockType, lockHelper.getLockAcquireTimeout(lockType));
           throw new DbLockTimeoutException(message);
         }
         log.debug("Sleeping {} milliseconds before re-attempting to acquire {} lock.",
-            dbLockProperties.getLockAcquirePollInterval(), lockType);
-        sleepUntilNextPoll();
+            lockHelper.getLockAcquirePollInterval(lockType), lockType);
+        sleepUntilNextPoll(lockType);
       }
     }
   }
 
-  private void sleepUntilNextPoll() {
+  private void sleepUntilNextPoll(LockType lockType) {
     try {
-      Thread.sleep(dbLockProperties.getLockAcquirePollInterval());
+      Thread.sleep(lockHelper.getLockAcquirePollInterval(lockType));
     } catch (InterruptedException ignored) {
       Thread.currentThread().interrupt();
     }
@@ -141,7 +146,8 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
 
   private void createLockReleaseTimer(AcquiredLock acquiredLock) {
     Timer timer = new Timer();
-    timer.schedule(new DbLockCancelTimer(acquiredLock), dbLockProperties.getLockHoldTimeout());
+    timer.schedule(new DbLockCancelTimer(acquiredLock),
+        lockHelper.getLockHoldTimeout(acquiredLock.getLockType()));
     timerMap.put(acquiredLock, timer);
   }
 
@@ -163,8 +169,9 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
     }
   }
 
-  private AcquiredLock getLockDetails(Connection conn, int lockId, LockType lockType, String lockVersion)
-      throws SQLException {
+  private AcquiredLock getLockDetails(Connection conn, int lockId, LockType lockType,
+      String lockVersion) throws SQLException {
+
     LatestLock latestLock = JdbcHelper.getLatestLock(conn, SQL_GET_LATEST_LOCK,
         lockType.getDbValue());
     return AcquiredLock.of(lockId, lockType, lockVersion, latestLock);
@@ -223,7 +230,8 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
   public void destroy() {
     log.info("Destroying DbLockService");
     // do not change iterator usage with enhanced for. GD.
-    for (Iterator<AcquiredLock> iterator = timerMap.keySet().iterator(); iterator.hasNext();) {
+    //noinspection ForLoopReplaceableByForEach
+    for (Iterator<AcquiredLock> iterator = timerMap.keySet().iterator(); iterator.hasNext(); ) {
       var acquiredLock = iterator.next();
       log.warn("Releasing still active {}", acquiredLock);
       try {
@@ -246,7 +254,7 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
           "Releasing lock {}-{} because of timeout: {}",
           acquiredLock.getLockType(),
           acquiredLock.getLockId(),
-          dbLockProperties.getLockHoldTimeout());
+          lockHelper.getLockHoldTimeout(acquiredLock.getLockType()));
       try {
         releaseLock(acquiredLock, false);
       } catch (DbLockException e) {

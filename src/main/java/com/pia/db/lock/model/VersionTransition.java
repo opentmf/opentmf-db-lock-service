@@ -13,9 +13,9 @@ public enum VersionTransition {
   UPGRADE,
 
   /**
-   * New and previous versions are equal.
+   * New and previous versions are the same.
    */
-  NO_CHANGE,
+  SAME_VERSION,
 
   /**
    * New version is smaller than the previous version.

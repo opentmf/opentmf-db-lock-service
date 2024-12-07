@@ -41,7 +41,7 @@ public final class AcquiredLock {
         lock.previousLock.getLockVersion().compareTo(lock.getLockVersion()) < 0) {
       return VersionTransition.UPGRADE;
     } else if (lock.previousLock.getLockVersion().equals(lock.getLockVersion())) {
-      return VersionTransition.NO_CHANGE;
+      return VersionTransition.SAME_VERSION;
     }
     return VersionTransition.DOWNGRADE;
   }
@@ -55,7 +55,7 @@ public final class AcquiredLock {
   }
 
   public boolean isSameVersion() {
-    return versionTransition == VersionTransition.NO_CHANGE;
+    return versionTransition == VersionTransition.SAME_VERSION;
   }
 
   /**

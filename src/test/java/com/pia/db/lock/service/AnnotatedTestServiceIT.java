@@ -172,7 +172,7 @@ class AnnotatedTestServiceIT {
     annotatedTestPersistenceService.insertLockLatest(LockType.LOCK_Y, "5.0", OffsetDateTime.now());
     LockContext context = this.annotatedTestService.taskWithUnchangedVersionFlagSetToTrue(new LockContext());
     Assertions.assertNotNull(context);
-    Assertions.assertEquals(VersionTransition.NO_CHANGE, context.getVersionTransition());
+    Assertions.assertEquals(VersionTransition.SAME_VERSION, context.getVersionTransition());
   }
 
   @Test
