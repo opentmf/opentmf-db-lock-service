@@ -305,3 +305,5 @@ public class SomeServiceImpl implements SomeService {
 ### 1.0.6
 - **Enhancement**: You can now override lockAcquirePollInterval, lockAcquireTimeout and lockHoldTimeout per supported lockType.
 - Updates Spring Boot to version 3.4.0
+### 1.0.7
+- Updated creation script for PostgreSQL to include begin and commit transaction

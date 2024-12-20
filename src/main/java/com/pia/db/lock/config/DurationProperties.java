@@ -22,17 +22,17 @@ public class DurationProperties {
 
   /**
    * The maximum duration in milliseconds to wait until the requested type of lock is available.
-   * Minimum 1 second.
+   * Minimum 1 second, default 2 minutes.
    */
   @Positive
   @Min(1000L)
-  long lockAcquireTimeout = 1000L * 60 * 2;
+  long lockAcquireTimeout = 120000L;
 
   /**
    * The maximum duration in milliseconds, that an obtained lock can be hold. When this timeout is
-   * reached, the lock will automatically be released. Minimum 2 seconds.
+   * reached, the lock will automatically be released. Minimum 2 seconds, default 5 minutes.
    */
   @Positive
   @Min(2000L)
-  long lockHoldTimeout = 1000L * 60 * 5;
+  long lockHoldTimeout = 300000L;
 }

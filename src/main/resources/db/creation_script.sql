@@ -1,3 +1,5 @@
+begin transaction;
+
 /*==============================================================*/
 /* Table: DB_LOCK                                               */
 /*==============================================================*/
@@ -116,3 +118,5 @@ comment on column DB_LOCK_LATEST.hostname is
 
 comment on column DB_LOCK_LATEST.lock_acquired_on is
 'The real lock was acquired at this datetime.';
+
+commit transaction;
