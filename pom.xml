@@ -8,7 +8,7 @@
   </parent>
   <groupId>org.opentmf.util</groupId>
   <artifactId>opentmf-db-lock-service</artifactId>
-  <version>1.0.8</version>
+  <version>1.0.9-SNAPSHOT</version>
 
   <description>
     Useful service to obtain cluster level persistent locks and memorize the latest lock versions.
@@ -332,7 +332,7 @@
     <connection>scm:git:git@github.com:opentmf/opentmf-db-lock-service.git</connection>
     <developerConnection>scm:git:git@github.com:opentmf/opentmf-db-lock-service.git
     </developerConnection>
-    <tag>opentmf-db-lock-service-1.0.8</tag>
+    <tag>HEAD</tag>
   </scm>
 
 </project>
