@@ -3,7 +3,7 @@ test:
     version1: 1.0
 
 
-pia:
+opentmf:
   db-lock:
     duration-overrides:
       lock-x:

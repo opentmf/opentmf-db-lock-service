@@ -11,7 +11,7 @@
   <logger name="reactor" level="INFO" />
   <logger name="io" level="INFO" />
 
-  <logger name="com.pia" level="TRACE" />
+  <logger name="org.opentmf" level="TRACE" />
   <logger name="liquibase" level="TRACE" />
   <logger name="org.liquibase" level="TRACE" />
   <logger name="reactor.netty.http.client" level="WARN"/>

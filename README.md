@@ -1,4 +1,4 @@
-# DB Lock Service
+# OpenTMF DB Lock Service
 Helper service for obtaining a cluster level lock using the client application's JDBC datasource.
 
 The library will autoconfigure itself on the condition of spring.datasource.url configuration property.
@@ -25,7 +25,7 @@ This library creates 3 database tables and interacts with them using pure JDBC a
 The following configuration properties are recognized by the service:
 
 ```yaml
-pia:
+opentmf:
     db-lock:
       create-tables: true
       lock-acquire-poll-interval: 1000
@@ -41,7 +41,7 @@ Starting from version 1.0.6, you can override the lock-acquire-poll-interval, lo
 For example, if you want to override the default values for the particular lock type = LOCK_X and LOCK_Y you can define the following properties:
 
 ```yaml
-pia:
+opentmf:
     db-lock:
       create-tables: true
       lock-acquire-poll-interval: 1000
@@ -60,17 +60,17 @@ pia:
 If an overridden duration is not specified for a particular lock type, then the default values are used, which pertains the old behaviour. 
 
 ## Usage
-The pia-db-lock-library is automatically included from pia-bpmn-sync-service and pia-catalog-sync-service. Therefore, there is no need to include a dependency to it, if the client uses one of the mentioned libraries.
+The opentmf-db-lock-library is automatically included from camunda7-bpmn-sync-service and dnext-catalog-sync-service. Therefore, there is no need to include a dependency to it, if the client uses one of the mentioned libraries.
 
 However, it is also possible to directly give a dependency to this library, for certain tasks that require to be performed within a cluster level lock plus to keep version history of successful completions.
 
-### Import pia-commons-versions
+### Import opentmf-commons-versions
 ```xml
 <dependencyManagement>
   <dependencies>
     <dependency>
-      <groupId>com.pia.commons</groupId>
-      <artifactId>pia-commons-versions</artifactId>
+      <groupId>org.opentmf</groupId>
+      <artifactId>opentmf-versions</artifactId>
       <version>RELEASE</version>
       <type>pom</type>
       <scope>import</scope>
@@ -81,12 +81,12 @@ However, it is also possible to directly give a dependency to this library, for 
 ### Add Maven Dependency
 ```xml
 <dependency>
-  <groupId>com.pia.commons</groupId>
-  <artifactId>pia-db-lock-service</artifactId>
+  <groupId>org.opentmf.util</groupId>
+  <artifactId>opentmf-db-lock-service</artifactId>
 </dependency>
 ```
 ### Implementation with `@UsingClusterLock`
-`@UsingClusterLock` annotation is provided by the pia-db-lock-service to simplify acquiring and releasing locks. After acquiring the specified lock, it executes the code within the service method and releases the lock after the method ends.
+`@UsingClusterLock` annotation is provided by the opentmf-db-lock-service to simplify acquiring and releasing locks. After acquiring the specified lock, it executes the code within the service method and releases the lock after the method ends.
 
 Below is: a sample service implementation with `@UsingClusterLock` annotation:
 
@@ -252,14 +252,14 @@ public class SomeOtherServiceImpl implements SomeOtherService {
 If you want your service method to be executed even if the previous lock version and requested version are the same, you can set the `executeOnSameVersion` flag to true in the `@UsingClusterLock` annotation.
 
 ```java
-import com.pia.db.lock.model.VersionTransition;
+
 
 @Slf4j
 @Service
 public class SomeServiceImpl implements SomeService {
 
   @UsingClusterLock(
-      lockType = LockType.LOCK_X, 
+      lockType = LockType.LOCK_X,
       requestedVersion = "${test.properties.version}",
       executeOnSameVersion = true)
   public void performTask(LockContext ctx) {
@@ -269,17 +269,17 @@ public class SomeServiceImpl implements SomeService {
           + "Perform the initial tasks.");
 
     } else if (ctx.isUpgrade()) {
-        log.debug("The requested version is higher than the previous lock version."
-                + "Do the upgrade.");
-      
+      log.debug("The requested version is higher than the previous lock version."
+          + "Do the upgrade.");
+
     } else if (ctx.isDowngrade()) {
-      log.debug("The requested version is lower than the previous lock version " 
-              + "and enough milliseconds has already passed to allow a downgrade. " 
-              + "Do the downgrade.");
+      log.debug("The requested version is lower than the previous lock version "
+          + "and enough milliseconds has already passed to allow a downgrade. "
+          + "Do the downgrade.");
 
     } else if (ctx.isSameVersion()) {
-      log.debug("The requested version is the same as the previous lock version." 
-              + "Do whatever you need to do within the obtained lock");
+      log.debug("The requested version is the same as the previous lock version."
+          + "Do whatever you need to do within the obtained lock");
     }
   }
 }
@@ -307,3 +307,5 @@ public class SomeServiceImpl implements SomeService {
 - Updates Spring Boot to version 3.4.0
 ### 1.0.7
 - Updated creation script for PostgreSQL to include begin and commit transaction
+### 1.0.8
+- Initial open-source version

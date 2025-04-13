@@ -1,1 +1,1 @@
-com.pia.db.lock.config.DbLockAutoConfiguration
+org.opentmf.db.lock.config.DbLockAutoConfiguration
