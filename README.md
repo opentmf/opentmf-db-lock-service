@@ -309,3 +309,5 @@ public class SomeServiceImpl implements SomeService {
 - Updated creation script for PostgreSQL to include begin and commit transaction
 ### 1.0.8
 - Initial open-source version
+### 1.0.9
+- Adds `boolean hasLock(LockType lockType)` to the `DbLockService`.

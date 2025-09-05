@@ -3,11 +3,6 @@ package org.opentmf.db.lock.service;
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
-import org.opentmf.db.lock.exception.DbLockException;
-import org.opentmf.db.lock.exception.DbLockTimeoutException;
-import org.opentmf.db.lock.model.AcquiredLock;
-import org.opentmf.db.lock.model.LockType;
-import org.opentmf.db.lock.service.api.DbLockService;
 import java.util.concurrent.TimeUnit;
 import lombok.extern.slf4j.Slf4j;
 import org.junit.jupiter.api.Assertions;
@@ -15,10 +10,14 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
+import org.opentmf.db.lock.exception.DbLockException;
+import org.opentmf.db.lock.exception.DbLockTimeoutException;
+import org.opentmf.db.lock.model.AcquiredLock;
+import org.opentmf.db.lock.model.LockType;
+import org.opentmf.db.lock.service.api.DbLockService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.SpringBootTest.WebEnvironment;
-import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.test.annotation.DirtiesContext.MethodMode;
 import org.springframework.test.context.junit.jupiter.SpringExtension;
@@ -34,9 +33,6 @@ class DbLockServiceIT {
   @Autowired
   private DbLockService dbLockService;
 
-  @Autowired
-  private JdbcTemplate jdbcTemplate;
-
   @Test
   void testAcquireLock_andThenReleaseTheLockOnTime_isSuccessful() throws DbLockException {
     AcquiredLock lock = dbLockService.acquireLock(LockType.BPMN, "1.0");
@@ -46,6 +42,7 @@ class DbLockServiceIT {
 
   @Test
   void testAcquireLock_withoutReleasingFirst_timesOut() throws DbLockException {
+    Assertions.assertFalse(dbLockService.hasLock(LockType.BPMN));
     AcquiredLock lock = dbLockService.acquireLock(LockType.BPMN, "1.0");
     DbLockTimeoutException e = assertThrows(DbLockTimeoutException.class,
         () -> dbLockService.acquireLock(LockType.BPMN, "1.0"));
@@ -62,6 +59,7 @@ class DbLockServiceIT {
     AcquiredLock acquiredLock = dbLockService.acquireLock(lockType, "1.0");
     Assertions.assertNotNull(acquiredLock);
     log.debug("Acquired lock details: {}", acquiredLock);
+    Assertions.assertTrue(dbLockService.hasLock(lockType));
     await()
         .atMost(5, TimeUnit.SECONDS)
         .pollInterval(300, TimeUnit.MILLISECONDS)
@@ -83,9 +81,6 @@ class DbLockServiceIT {
   }
 
   private boolean lockDoesNotExist(LockType lockType) {
-    Integer count = jdbcTemplate.queryForObject(
-        "select count(*) from DB_LOCK where lock_type = ?",
-        Integer.class, lockType.getDbValue());
-    return count != null && count == 0;
+    return !dbLockService.hasLock(lockType);
   }
 }

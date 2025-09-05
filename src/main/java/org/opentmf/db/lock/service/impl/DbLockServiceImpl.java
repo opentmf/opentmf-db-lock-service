@@ -43,6 +43,8 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
 
   private final Map<AcquiredLock, Timer> timerMap = new HashMap<>();
 
+  private static final String SQL_LOCK_COUNT = "select count(*) from DB_LOCK where lock_type = ?";
+
   private static final String SQL_LATEST_LOCK_COUNT =
       "select count(*) from DB_LOCK_LATEST where lock_type = ?";
 
@@ -112,6 +114,21 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
     } finally {
       JdbcHelper.close(conn);
     }
+  }
+
+  @Override
+  public boolean hasLock(LockType lockType) {
+    Connection conn = null;
+    try {
+      conn = JdbcHelper.getConnection(jdbcTemplate);
+      var cnt = JdbcHelper.count(conn, SQL_LOCK_COUNT, lockType.getDbValue());
+      return cnt > 0;
+    } catch (SQLException e) {
+      log.warn("Ignoring SQLException on hasLock()", e);
+    } finally {
+      JdbcHelper.close(conn);
+    }
+    return false;
   }
 
   private int lock(Connection conn, LockType lockType, String lockVersion)

@@ -26,4 +26,11 @@ public interface DbLockService {
    * @param updateLatestLock true if the latest lock record needs to be updated.
    */
   void releaseLock(AcquiredLock lock, boolean updateLatestLock) throws DbLockException;
+
+    /**
+     * Checks if there is an ongoing lock of the given type, returns true if.
+     * @param lockType the requested lock type.
+     * @return true if there is an ongoing lock for this lock type, false otherwise.
+     */
+  boolean hasLock(LockType lockType);
 }
