@@ -113,7 +113,7 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
       cancelAndRemoveLockReleaseTimer(lock);
     } catch (SQLException e) {
       JdbcHelper.rollback(conn);
-      log.error("", e);
+      log.warn("Failed to release lock id={}, type={}", lock.getLockId(), lock.getLockType(), e);
       throw new DbLockException("Couldn't release lock", e);
     } finally {
       JdbcHelper.close(conn);
