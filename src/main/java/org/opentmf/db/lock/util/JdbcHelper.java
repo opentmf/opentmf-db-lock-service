@@ -14,9 +14,8 @@ import lombok.Generated;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.datasource.DataSourceUtils;
 import org.springframework.jdbc.datasource.init.ScriptUtils;
-import org.springframework.lang.NonNull;
+import org.jspecify.annotations.NonNull;
 import org.springframework.util.Assert;
 
 /**
@@ -86,12 +85,8 @@ public final class JdbcHelper {
     }
   }
 
-  public static void commit(Connection conn) {
-    try {
-      conn.commit();
-    } catch (SQLException e) {
-      log.warn("Ignoring exception during rollback.", e);
-    }
+  public static void commit(Connection conn) throws SQLException {
+    conn.commit();
   }
 
   public static void close(Connection conn) {
@@ -120,7 +115,7 @@ public final class JdbcHelper {
     log.debug("In dbLockService.createTables()...");
     DataSource dataSource = jdbcTemplate.getDataSource();
     Assert.notNull(dataSource, "DataSource cannot be obtained during DB_Lock service init");
-    try (Connection conn = DataSourceUtils.getConnection(dataSource)) {
+    try (Connection conn = dataSource.getConnection()) {
       logMetaData(conn.getMetaData(), conn.getSchema());
       ScriptUtils.executeSqlScript(conn, new ClassPathResource("db/creation_script.sql"));
     } catch (SQLException e) {
@@ -138,9 +133,11 @@ public final class JdbcHelper {
     int i = 0;
     log.trace("No\tCatalog\tSchema\tTable\tType");
     log.trace("-----\t---------------\t---------------\t---------------\t---------------");
-    for (ResultSet rs = metaData.getTables(null, schema, "%", new String[] {"TABLE"}); rs.next(); ) {
-      log.trace("{}\t{}\t{}\t{}\t{}", ++i,
-          rs.getString(1), rs.getString(2), rs.getString(3), rs.getString(4));
+    try (ResultSet rs = metaData.getTables(null, schema, "%", new String[] {"TABLE"})) {
+      while (rs.next()) {
+        log.trace("{}\t{}\t{}\t{}\t{}", ++i,
+            rs.getString(1), rs.getString(2), rs.getString(3), rs.getString(4));
+      }
     }
   }
 

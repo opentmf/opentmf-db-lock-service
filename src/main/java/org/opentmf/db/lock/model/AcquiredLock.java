@@ -36,6 +36,11 @@ public final class AcquiredLock {
     return acquiredLock;
   }
 
+  /**
+   * Compares versions lexicographically via {@link String#compareTo(String)}. Callers should
+   * use zero-padded or fixed-width version strings (e.g. "01.00") when numeric ordering matters,
+   * because lexicographic comparison means "9.0" &gt; "10.0".
+   */
   private static VersionTransition detectVersionTransition(AcquiredLock lock) {
     if (lock.getPreviousLock() == null ||
         lock.previousLock.getLockVersion().compareTo(lock.getLockVersion()) < 0) {

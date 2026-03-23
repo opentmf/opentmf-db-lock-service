@@ -1,5 +1,9 @@
 package org.opentmf.db.lock.model;
 
+import java.util.Map;
+import java.util.function.Function;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 import lombok.Getter;
 
 /**
@@ -35,9 +39,22 @@ public enum LockType {
    */
   LOCK_Z("Z");
 
+  private static final Map<String, LockType> BY_DB_VALUE =
+      Stream.of(values()).collect(Collectors.toMap(LockType::getDbValue, Function.identity()));
+
   private final String dbValue;
 
   LockType(String dbValue) {
     this.dbValue = dbValue;
+  }
+
+  /**
+   * Returns the {@link LockType} for the given database value, or {@code null} if not found.
+   *
+   * @param dbValue the single-character database value (e.g. "B", "C", "X").
+   * @return the matching LockType, or null.
+   */
+  public static LockType fromDbValue(String dbValue) {
+    return BY_DB_VALUE.get(dbValue);
   }
 }

@@ -119,4 +119,11 @@ comment on column DB_LOCK_LATEST.hostname is
 comment on column DB_LOCK_LATEST.lock_acquired_on is
 'The real lock was acquired at this datetime.';
 
+/*==============================================================*/
+/* Widen lock_version from VARCHAR(10) to VARCHAR(50)          */
+/*==============================================================*/
+alter table DB_LOCK alter column lock_version type VARCHAR(50);
+alter table DB_LOCK_HISTORY alter column lock_version type VARCHAR(50);
+alter table DB_LOCK_LATEST alter column lock_version type VARCHAR(50);
+
 commit transaction;

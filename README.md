@@ -286,28 +286,4 @@ public class SomeServiceImpl implements SomeService {
 ```
 
 ## Version History
-### 1.0.0
-- Initial Version
-### 1.0.1
-- Documentation fixes
-### 1.0.2
-- Adds `@UsingClusterLock` annotation
-### 1.0.3
-- Adds support for `LockContext` parameter in methods annotated with `@UsingClusterLock` to retrieve lock details.
-### 1.0.4
-- Updates dependent library versions to their latest.
-### 1.0.5
-- **Heads Up**: Backward Incompatible version.
-- Updates execution logic of `@UsingClusterLock`, adds `executeOnSameVersion` flag to be able to execute the service method even if the lock version is not changed.
-- Introduces `VersionTransition` enum to represent a version transition between two versions.
-- Updates the `LockContext` class, adds `versionTransition` attribute and removes `upgrade` field.
-- Updates `AcquiredLock` class, adds new methods to calculate the version change and to check if downgrade is allowed. Removes methods taking lockVersion as a parameter, since now AcquiredLock also contains this information.
-### 1.0.6
-- **Enhancement**: You can now override lockAcquirePollInterval, lockAcquireTimeout and lockHoldTimeout per supported lockType.
-- Updates Spring Boot to version 3.4.0
-### 1.0.7
-- Updated creation script for PostgreSQL to include begin and commit transaction
-### 1.0.8
-- Initial open-source version
-### 1.0.9
-- Adds `boolean hasLock(LockType lockType)` to the `DbLockService`.
+See [CHANGELOG.md](CHANGELOG.md) for detailed version history.

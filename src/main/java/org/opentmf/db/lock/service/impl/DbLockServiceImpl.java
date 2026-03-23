@@ -13,19 +13,20 @@ import org.opentmf.db.lock.util.JdbcHelper;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.OffsetDateTime;
 import java.time.temporal.ChronoUnit;
-import java.util.HashMap;
-import java.util.Iterator;
+import java.util.ArrayList;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.Timer;
 import java.util.TimerTask;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.DisposableBean;
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.transaction.annotation.Transactional;
 
 /**
  * @author Gokhan Demir
@@ -41,7 +42,7 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
     lockHelper = new DurationHelper(dbLockProperties);
   }
 
-  private final Map<AcquiredLock, Timer> timerMap = new HashMap<>();
+  private final Map<AcquiredLock, Timer> timerMap = new ConcurrentHashMap<>();
 
   private static final String SQL_LOCK_COUNT = "select count(*) from DB_LOCK where lock_type = ?";
 
@@ -73,6 +74,9 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
           + "from DB_LOCK "
           + "where DB_LOCK.id = ?";
 
+  private static final String SQL_SELECT_ALL_LOCKS =
+      "select id, lock_type, lock_version, hostname, created_on from DB_LOCK";
+
   @Override
   public AcquiredLock acquireLock(LockType lockType, String lockVersion) throws DbLockException {
     Connection conn = null;
@@ -89,7 +93,7 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
       return acquiredLock;
     } catch (SQLException e) {
       JdbcHelper.rollback(conn);
-      throw new DbLockException("", e);
+      throw new DbLockException("Failed to acquire lock for " + lockType, e);
     } finally {
       JdbcHelper.close(conn);
     }
@@ -126,6 +130,7 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
     } catch (SQLException e) {
       log.warn("Ignoring SQLException on hasLock()", e);
     } finally {
+      JdbcHelper.rollback(conn);
       JdbcHelper.close(conn);
     }
     return false;
@@ -139,8 +144,14 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
         return JdbcHelper.autoIncrementInsert(conn, SQL_INSERT_LOCK,
             lockType.getDbValue(), lockVersion, getHostName());
       } catch (SQLException e) {
-        log.warn("errorCode: {}, sqlState: {}, description: {}", e.getErrorCode(), e.getSQLState(),
-            e.getMessage());
+        String sqlState = e.getSQLState();
+        boolean isConstraintViolation = sqlState != null && sqlState.startsWith("23");
+        if (!isConstraintViolation) {
+          throw new DbLockException("Database error while acquiring lock for " + lockType, e);
+        }
+        JdbcHelper.rollback(conn);
+        log.debug("Lock {} is held by another instance (sqlState={}). Retrying...",
+            lockType, sqlState);
         if ((System.currentTimeMillis() - t0) > lockHelper.getLockAcquireTimeout(lockType)) {
           String message = String.format("Cannot acquire DB Lock for %s within the configured " +
               "%d millis. Giving up.", lockType, lockHelper.getLockAcquireTimeout(lockType));
@@ -246,10 +257,8 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
   @Override
   public void destroy() {
     log.info("Destroying DbLockService");
-    // do not change iterator usage with enhanced for. GD.
-    //noinspection ForLoopReplaceableByForEach
-    for (Iterator<AcquiredLock> iterator = timerMap.keySet().iterator(); iterator.hasNext(); ) {
-      var acquiredLock = iterator.next();
+    var locks = new ArrayList<>(timerMap.keySet());
+    for (var acquiredLock : locks) {
       log.warn("Releasing still active {}", acquiredLock);
       try {
         releaseLock(acquiredLock, false);
@@ -259,13 +268,57 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
     }
   }
 
+  /**
+   * Removes stale locks that were left behind due to non-graceful shutdowns (e.g. kill -9,
+   * OOM kill, node eviction). A lock is considered stale if it has been held longer than the
+   * configured lock-hold-timeout for its type. Intended to be called once at startup.
+   */
+  public void removeStaleLocks() {
+    Connection conn = null;
+    try {
+      conn = JdbcHelper.getConnection(jdbcTemplate);
+      try (PreparedStatement ps = conn.prepareStatement(SQL_SELECT_ALL_LOCKS);
+           ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          int lockId = rs.getInt("id");
+          String lockTypeValue = rs.getString("lock_type").trim();
+          String lockVersion = rs.getString("lock_version");
+          String hostname = rs.getString("hostname");
+          OffsetDateTime createdOn = rs.getObject("created_on", OffsetDateTime.class);
+
+          LockType lockType = LockType.fromDbValue(lockTypeValue);
+          if (lockType == null) {
+            log.warn("Skipping lock id={} with unknown lock_type '{}'", lockId, lockTypeValue);
+            continue;
+          }
+
+          long holdTimeout = lockHelper.getLockHoldTimeout(lockType);
+          OffsetDateTime expiresAt = createdOn.plus(holdTimeout, ChronoUnit.MILLIS);
+          if (expiresAt.isBefore(OffsetDateTime.now())) {
+            long staleSecs = ChronoUnit.SECONDS.between(expiresAt, OffsetDateTime.now());
+            log.warn("Removing stale lock: id={}, type={}, version={}, hostname={}, "
+                    + "created_on={} (expired {}s ago, holdTimeout={}ms)",
+                lockId, lockType, lockVersion, hostname, createdOn, staleSecs, holdTimeout);
+            JdbcHelper.executeUpdate(conn, SQL_INSERT_HISTORY, lockId);
+            JdbcHelper.executeUpdate(conn, SQL_DELETE_LOCK, lockId, lockTypeValue);
+          }
+        }
+      }
+      JdbcHelper.commit(conn);
+    } catch (SQLException e) {
+      JdbcHelper.rollback(conn);
+      log.warn("Failed to clean up stale locks on startup", e);
+    } finally {
+      JdbcHelper.close(conn);
+    }
+  }
+
   @RequiredArgsConstructor
   private class DbLockCancelTimer extends TimerTask {
 
     private final AcquiredLock acquiredLock;
 
     @Override
-    @Transactional
     public void run() {
       log.warn(
           "Releasing lock {}-{} because of timeout: {}",

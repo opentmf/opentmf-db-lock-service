@@ -1,6 +1,7 @@
 package org.opentmf.db.lock.annotation.impl;
 
 import org.opentmf.db.lock.annotation.UsingClusterLock;
+import org.opentmf.db.lock.exception.DbLockException;
 import org.opentmf.db.lock.model.AcquiredLock;
 import org.opentmf.db.lock.model.LockContext;
 import org.opentmf.db.lock.service.api.DbLockService;
@@ -26,7 +27,7 @@ public class UsingClusterLockAnnotationAspect {
   private final DbLockService dbLockService;
 
   @Around("@annotation(usingClusterLock)")
-  private Object wrapWithLock(ProceedingJoinPoint pjp, UsingClusterLock usingClusterLock)
+  public Object wrapWithLock(ProceedingJoinPoint pjp, UsingClusterLock usingClusterLock)
       throws Throwable {
     String requestedVersion = resolveProperty(usingClusterLock.requestedVersion());
     long downgradeAllowedMillis =
@@ -70,11 +71,22 @@ public class UsingClusterLockAnnotationAspect {
     return null;
   }
 
-  private String resolveProperty(String value) {
-    if (value.startsWith("${") && value.endsWith("}")) {
-      return environment.getProperty(parseValue(value));
+  private String resolveProperty(String value) throws DbLockException {
+    if (value.startsWith("${")) {
+      if (!value.endsWith("}")) {
+        throw new DbLockException("Malformed property placeholder: '" + value + "'");
+      }
+      String key = parseValue(value);
+      String resolved = environment.getProperty(key);
+      if (resolved == null) {
+        throw new DbLockException("Property '" + key + "' not found in environment");
+      }
+      return resolved;
     }
-    if (value.startsWith("#{") && value.endsWith("}")) {
+    if (value.startsWith("#{")) {
+      if (!value.endsWith("}")) {
+        throw new DbLockException("Malformed SpEL expression: '" + value + "'");
+      }
       return new SpelExpressionParser().parseExpression(parseValue(value)).getValue(String.class);
     }
     return value;
