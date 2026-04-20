@@ -119,7 +119,7 @@ class AnnotatedTestServiceIT {
     annotatedTestPersistenceService.deleteLocks(LockType.LOCK_Y);
     String arg = "lock_y";
     String returnValue = this.annotatedTestService.taskWithCustomArg(arg);
-    Assertions.assertEquals(returnValue, arg);
+    Assertions.assertEquals(arg, returnValue);
   }
 
   @Test
@@ -130,7 +130,7 @@ class AnnotatedTestServiceIT {
     String arg = "lock_y";
     String returnValue =
         this.annotatedTestService.taskWithCustomArgAndContextArg(arg, new LockContext());
-    Assertions.assertEquals(returnValue, "4.0" + arg);
+    Assertions.assertEquals("4.0" + arg, returnValue);
   }
 
   @Test
@@ -188,6 +188,45 @@ class AnnotatedTestServiceIT {
     annotatedTestPersistenceService.deleteLocks(LockType.LOCK_Y);
     annotatedTestPersistenceService.insertLockLatest(LockType.LOCK_Y, "6.0", OffsetDateTime.now().minusMinutes(15));
     LockContext context = this.annotatedTestService.taskWithContextArg(new LockContext());
+    Assertions.assertNotNull(context);
+    Assertions.assertEquals(VersionTransition.DOWNGRADE, context.getVersionTransition());
+  }
+
+  @Test
+  void testServiceUsingClusterLock_withContextSuccessFalse_doesNotUpdateLatestLock() {
+    annotatedTestPersistenceService.deleteLocks(LockType.LOCK_Y);
+    var initialHistory = annotatedTestPersistenceService.historyCount(LockType.LOCK_Y);
+    annotatedTestService.taskMarksUnsuccessful(new LockContext());
+    Assertions.assertEquals(
+        initialHistory + 1, annotatedTestPersistenceService.historyCount(LockType.LOCK_Y));
+    Assertions.assertFalse(annotatedTestPersistenceService.latestLockExists(LockType.LOCK_Y));
+  }
+
+  @Test
+  void testServiceUsingClusterLock_withContextSuccessDefaultTrue_updatesLatestLock() {
+    annotatedTestPersistenceService.deleteLocks(LockType.LOCK_Y);
+    annotatedTestService.taskWithContextArg(new LockContext());
+    Assertions.assertTrue(annotatedTestPersistenceService.latestLockExists(LockType.LOCK_Y));
+  }
+
+  @Test
+  void testServiceUsingClusterLock_withFailureMessage_wrapsThrownExceptionInIllegalStateException() {
+    annotatedTestPersistenceService.deleteLocks(LockType.LOCK_X);
+    IllegalStateException e = Assertions.assertThrows(IllegalStateException.class,
+        () -> annotatedTestService.taskWithFailureMessageThrows());
+    Assertions.assertEquals("Task failed", e.getMessage());
+    Assertions.assertNotNull(e.getCause());
+    Assertions.assertEquals("inner cause", e.getCause().getMessage());
+    Assertions.assertFalse(annotatedTestPersistenceService.latestLockExists(LockType.LOCK_X));
+  }
+
+  @Test
+  void testServiceUsingClusterLock_withIsoDurationDowngradeAllowedMillis_parsesAndExecutes() {
+    annotatedTestPersistenceService.deleteLocks(LockType.LOCK_Z);
+    annotatedTestPersistenceService.insertLockLatest(
+        LockType.LOCK_Z, "2.0", OffsetDateTime.now().minusMinutes(15));
+    LockContext context =
+        annotatedTestService.taskWithDurationDowngradeAllowed(new LockContext());
     Assertions.assertNotNull(context);
     Assertions.assertEquals(VersionTransition.DOWNGRADE, context.getVersionTransition());
   }

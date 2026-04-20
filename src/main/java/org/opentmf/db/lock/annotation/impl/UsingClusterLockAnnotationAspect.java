@@ -5,6 +5,7 @@ import org.opentmf.db.lock.exception.DbLockException;
 import org.opentmf.db.lock.model.AcquiredLock;
 import org.opentmf.db.lock.model.LockContext;
 import org.opentmf.db.lock.service.api.DbLockService;
+import java.time.Duration;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.aspectj.lang.ProceedingJoinPoint;
@@ -31,7 +32,8 @@ public class UsingClusterLockAnnotationAspect {
       throws Throwable {
     String requestedVersion = resolveProperty(usingClusterLock.requestedVersion());
     long downgradeAllowedMillis =
-        Long.parseLong(resolveProperty(usingClusterLock.downgradeAllowedMillis()));
+        Duration.parse(resolveProperty(usingClusterLock.downgradeAllowedAfter())).toMillis();
+    String failureMessage = usingClusterLock.failureMessage();
 
     boolean lockReleased = false;
     AcquiredLock lock = null;
@@ -42,12 +44,14 @@ public class UsingClusterLockAnnotationAspect {
           (lock.isDowngrade() && lock.isDowngradeAllowed(downgradeAllowedMillis)) ||
           (lock.isSameVersion() && usingClusterLock.executeOnSameVersion())) {
 
-        // Execute the actual business logic
-        Object result = pjp.proceed(enrichFirstLockContextIfAny(pjp, lock));
+        LockContext ctx = enrichFirstLockContextIfAny(pjp, lock);
 
-        // No exception from the service method means we have a successful completion.
-        // Release the lock and update latest_lock record.
-        dbLockService.releaseLock(lock, true);
+        // Execute the actual business logic
+        Object result = pjp.proceed(pjp.getArgs());
+
+        // Release the lock. If a LockContext was threaded through, let the method's
+        // outcome determine whether the latest-lock record should be updated.
+        dbLockService.releaseLock(lock, ctx == null || ctx.isSuccess());
         lockReleased = true;
 
         return result;
@@ -59,13 +63,24 @@ public class UsingClusterLockAnnotationAspect {
 
     } catch (Exception e) {
       if (lock != null) {
-        dbLockService.releaseLock(lock, false);
+        try {
+          dbLockService.releaseLock(lock, false);
+        } catch (DbLockException releaseEx) {
+          e.addSuppressed(releaseEx);
+        }
         lockReleased = true;
+      }
+      if (!failureMessage.isEmpty()) {
+        throw new IllegalStateException(failureMessage, e);
       }
       throw e;
     } finally {
       if (!lockReleased && lock != null) {
-        dbLockService.releaseLock(lock, false);
+        try {
+          dbLockService.releaseLock(lock, false);
+        } catch (DbLockException ignored) {
+          // best-effort cleanup; primary failure has already been propagated
+        }
       }
     }
     return null;
@@ -76,12 +91,11 @@ public class UsingClusterLockAnnotationAspect {
       if (!value.endsWith("}")) {
         throw new DbLockException("Malformed property placeholder: '" + value + "'");
       }
-      String key = parseValue(value);
-      String resolved = environment.getProperty(key);
-      if (resolved == null) {
-        throw new DbLockException("Property '" + key + "' not found in environment");
+      try {
+        return environment.resolveRequiredPlaceholders(value);
+      } catch (IllegalArgumentException e) {
+        throw new DbLockException(e.getMessage());
       }
-      return resolved;
     }
     if (value.startsWith("#{")) {
       if (!value.endsWith("}")) {
@@ -96,16 +110,16 @@ public class UsingClusterLockAnnotationAspect {
     return value.substring(2, value.length() - 1).trim();
   }
 
-  private Object[] enrichFirstLockContextIfAny(ProceedingJoinPoint joinPoint, AcquiredLock lock) {
-    Object[] methodArgs = joinPoint.getArgs();
-    for (Object methodArg : methodArgs) {
+  private LockContext enrichFirstLockContextIfAny(ProceedingJoinPoint joinPoint,
+      AcquiredLock lock) {
+    for (Object methodArg : joinPoint.getArgs()) {
       if (methodArg instanceof LockContext ctx) {
         ctx.setLatestLock(lock.getPreviousLock());
         ctx.setVersionTransition(lock.getVersionTransition());
         ctx.setRequestedVersion(lock.getLockVersion());
-        break;
+        return ctx;
       }
     }
-    return methodArgs;
+    return null;
   }
 }

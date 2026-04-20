@@ -27,6 +27,19 @@ public class LockContext {
   private VersionTransition versionTransition;
 
   /**
+   * Indicates whether the annotated method considers its execution successful. Defaults to
+   * <b>true</b>. When the business logic completes normally but determines that no effective
+   * change was applied (e.g. all target resources were already up-to-date), it may call
+   * {@code setSuccess(false)} to signal that the lock must be released <em>without</em>
+   * recording the requested version as the latest completed version. On the next run with the
+   * same version, the method will be re-executed instead of being short-circuited.
+   *
+   * <p>Ignored when the annotated method does not declare a {@link LockContext} parameter or
+   * when it throws an exception (which always releases the lock with success=false).
+   */
+  private boolean success = true;
+
+  /**
    * Returns true if this is the initial lock that we have acquired, false otherwise.
    * @return true if this is the initial lock that we have acquired, false otherwise.
    */
@@ -51,7 +64,7 @@ public class LockContext {
    * Returns true is this is a downgrade and this downgrade is allowed to be executed.
    * <p>
    * A downgrade which means the requested version is saller than the latest successfully completed
-   * version and the downgradeAllowedMillis has been reached. So we must be going for a downgrade.
+   * version and the downgradeAllowedAfter has been reached. So we must be going for a downgrade.
    * </p>
    *
    * @return Returns true is this is a downgrade and this downgrade is allowed to be executed, false

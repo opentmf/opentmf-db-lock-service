@@ -110,7 +110,7 @@ This code will cause the following:
     - no previous lock of that lockType exists,
     - previous lock version is lower than the requested
     - previous lock version is equal to the requested and `executeOnSameVersion` flag is set to true
-    - previous lock version is greater than the requested and the `downgradeAllowedMillis` duration is met (i.e. rollback is applicable)
+    - previous lock version is greater than the requested and the `downgradeAllowedAfter` duration is met (i.e. rollback is applicable)
   - Then the service method will be executed.
   - Otherwise, the service method will NOT be executed.
 - And finally, the acquired lock will be released.
@@ -141,6 +141,19 @@ public class LockContext {
   private VersionTransition versionTransition;
 
   /**
+   * Indicates whether the annotated method considers its execution successful. Defaults to
+   * <b>true</b>. When the business logic completes normally but determines that no effective
+   * change was applied (e.g. all target resources were already up-to-date), it may call
+   * {@code setSuccess(false)} to signal that the lock must be released <em>without</em>
+   * recording the requested version as the latest completed version. On the next run with the
+   * same version, the method will be re-executed instead of being short-circuited.
+   *
+   * <p>Ignored when the annotated method does not declare a {@link LockContext} parameter or
+   * when it throws an exception (which always releases the lock with success=false).
+   */
+  private boolean success = true;
+
+  /**
    * Returns true if this is the initial lock that we have acquired, false otherwise.
    * @return true if this is the initial lock that we have acquired, false otherwise.
    */
@@ -165,7 +178,7 @@ public class LockContext {
    * Returns true is this is a downgrade and this downgrade is allowed to be executed.
    * <p>
    * A downgrade which means the requested version is saller than the latest successfully completed
-   * version and the downgradeAllowedMillis has been reached. So we must be going for a downgrade.
+   * version and the downgradeAllowedAfter has been reached. So we must be going for a downgrade.
    * </p>
    *
    * @return Returns true is this is a downgrade and this downgrade is allowed to be executed, false
@@ -284,6 +297,66 @@ public class SomeServiceImpl implements SomeService {
   }
 }
 ```
+
+### Signalling a no-op run with `LockContext.success`
+
+By default, a successful return from the annotated method causes the lock to be released with the requested version recorded as the latest completed one (row inserted/updated in `DB_LOCK_LATEST`). On the next run with the same version, the method is short-circuited.
+
+If your method completes normally but determines that **nothing effective was applied** (for example, all target resources were already up-to-date), you can call `context.setSuccess(false)` before returning. The lock is released as usual, but the `DB_LOCK_LATEST` record is **not** updated — so the next run with the same version will re-execute the method.
+
+```java
+@UsingClusterLock(lockType = LockType.LOCK_X, requestedVersion = "${app.catalog-version}")
+public void syncCatalog(LockContext ctx) {
+  int touched = doSync();
+  if (touched == 0) {
+    // Ran to completion but made no effective changes: don't record this version as applied.
+    ctx.setSuccess(false);
+  }
+}
+```
+
+Notes:
+- The default is `true`, so existing methods that don't declare a `LockContext` parameter are unaffected.
+- Throwing an exception always releases the lock with `success=false` regardless of what `ctx.isSuccess()` says.
+
+### Wrapping failures with `failureMessage`
+
+`acquireLock` is declared `throws DbLockException` (checked). If an annotated method doesn't declare or catch `DbLockException`, Spring AOP surfaces it as an `UndeclaredThrowableException`, which is awkward for callers. Similarly, business exceptions propagate raw through the aspect.
+
+Setting `failureMessage` makes the aspect wrap any exception from inside the flow as `IllegalStateException(failureMessage, cause)`:
+
+```java
+@UsingClusterLock(
+    lockType = LockType.CATALOG,
+    requestedVersion = "${app.catalog-version}",
+    failureMessage = "Could not synchronize Catalogs")
+public void syncCatalog(LockContext ctx) { ... }
+```
+
+- `DbLockException` from lock acquisition → `IllegalStateException("Could not synchronize Catalogs", dbLockEx)`.
+- Any exception from the method body → same wrap.
+- Default empty → no wrap (current behavior).
+
+### `downgradeAllowedAfter` requires an ISO-8601 duration
+
+The `downgradeAllowedAfter` annotation value must be an ISO-8601 duration string — the format produced by `java.time.Duration.toString()` and accepted by `Duration.parse(...)`:
+
+```java
+@UsingClusterLock(lockType = LockType.LOCK_X, requestedVersion = "1.0",
+    downgradeAllowedAfter = "PT10M") // ten minutes
+public void task() { ... }
+```
+
+Property placeholders (`${...}`) and SpEL (`#{...}`) are resolved first, so bindings from a `Duration`-typed `@ConfigurationProperties` field also work without manual conversion. The full Spring placeholder grammar is supported, including default values:
+
+```java
+@UsingClusterLock(lockType = LockType.LOCK_X,
+    requestedVersion = "${app.version}",
+    downgradeAllowedAfter = "${app.downgrade-allowed-after:PT10M}")
+public void task() { ... }
+```
+
+When the property is absent from the environment, the default (`PT10M` above) applies.
 
 ## Version History
 See [CHANGELOG.md](CHANGELOG.md) for detailed version history.

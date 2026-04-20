@@ -68,4 +68,25 @@ public class AnnotatedTestService {
   public LockContext taskWithUnchangedVersionFlagSetToTrue(LockContext context) {
     return context;
   }
+
+  @UsingClusterLock(lockType = LockType.LOCK_Y, requestedVersion = "7.0")
+  public void taskMarksUnsuccessful(LockContext context) {
+    context.setSuccess(false);
+  }
+
+  @UsingClusterLock(
+      lockType = LockType.LOCK_X,
+      requestedVersion = "8.0",
+      failureMessage = "Task failed")
+  public void taskWithFailureMessageThrows() {
+    throw new RuntimeException("inner cause");
+  }
+
+  @UsingClusterLock(
+      lockType = LockType.LOCK_Z,
+      requestedVersion = "1.0",
+      downgradeAllowedAfter = "PT10M")
+  public LockContext taskWithDurationDowngradeAllowed(LockContext context) {
+    return context;
+  }
 }

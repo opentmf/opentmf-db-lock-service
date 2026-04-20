@@ -4,7 +4,20 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
-## [2.0.0] - Unreleased
+## [2.1.0] - 2026-04-17
+
+### Added
+- `LockContext.success` (default `true`). When a method annotated with `@UsingClusterLock` declares a `LockContext` parameter, it may call `context.setSuccess(false)` to release the lock without recording the requested version as the latest successful one — useful when the method ran but determined that no effective change was applied.
+- `@UsingClusterLock.failureMessage` (default empty). When non-empty, any exception raised from inside the aspect — including checked `DbLockException` from `acquireLock` and any exception thrown by the annotated method — is wrapped as `new IllegalStateException(failureMessage, cause)` before propagation. Relieves callers from declaring or catching `DbLockException` and avoids `UndeclaredThrowableException` from Spring AOP.
+- Property placeholders in `@UsingClusterLock` values now support Spring's default-value syntax, e.g. `"${opentmf.catalog-sync.downgrade-allowed-after:PT10M}"`. The aspect now delegates to `Environment.resolveRequiredPlaceholders`, so the full Spring placeholder grammar (defaults, nested placeholders, multiple placeholders per string) is available.
+
+### Changed
+- **Breaking**: Renamed `@UsingClusterLock.downgradeAllowedMillis` to `downgradeAllowedAfter`, and its value is now required to be an ISO-8601 duration string (e.g. `"PT10M"`). Plain millisecond counts are no longer accepted. Default changed from `"600000"` to `"PT10M"` (equivalent). Callers must update both the field name and any numeric values. Property placeholders and SpEL resolution still apply before parsing.
+
+### Fixed
+- Release-lock failures inside the aspect's error-handling path are now attached as suppressed exceptions instead of replacing the primary cause. Previously a `DbLockException` from the cleanup `releaseLock` call could mask the original business exception.
+
+## [2.0.0] - 2026-03-23
 
 ### Added
 - Stale lock cleanup at startup. Locks orphaned by non-graceful shutdowns (kill -9, OOM kill, node eviction) are now automatically detected and removed during auto-configuration, respecting per-type `lockHoldTimeout` overrides.
