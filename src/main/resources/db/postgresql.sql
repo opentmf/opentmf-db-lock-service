@@ -7,7 +7,7 @@ create table if not exists DB_LOCK (
    id                   SERIAL               not null,
    lock_type            CHAR(1)              not null
       constraint CKC_LOCK_TYPE_DB_LOCK check (lock_type in ('B','C','X','Y','Z')),
-   lock_version         VARCHAR(10)          not null,
+   lock_version         VARCHAR(50)          not null,
    hostname             VARCHAR(255)         not null,
    created_on           TIMESTAMP WITH TIME ZONE not null default CURRENT_TIMESTAMP,
    constraint PK_DB_LOCK primary key (id)
@@ -46,7 +46,7 @@ create table if not exists DB_LOCK_HISTORY (
    lock_id              INT4                 not null,
    lock_type            CHAR(1)              not null
       constraint CKC_LOCK_TYPE_DB_LOCK_ check (lock_type in ('B','C','X','Y','Z')),
-   lock_version         VARCHAR(10)          not null,
+   lock_version         VARCHAR(50)          not null,
    hostname             VARCHAR(255)         not null,
    lock_acquired_on     TIMESTAMP WITH TIME ZONE not null default CURRENT_TIMESTAMP,
    lock_released_on     TIMESTAMP WITH TIME ZONE not null default CURRENT_TIMESTAMP,
@@ -98,7 +98,7 @@ lock_version
 create table if not exists DB_LOCK_LATEST (
    lock_type            CHAR(1)              not null
       constraint CKC_LOCK_TYPE_DB_LOCK_ check (lock_type in ('B','C','X','Y','Z')),
-   lock_version         VARCHAR(10)          not null,
+   lock_version         VARCHAR(50)          not null,
    hostname             VARCHAR(255)         not null,
    lock_acquired_on     TIMESTAMP WITH TIME ZONE not null,
    constraint PK_DB_LOCK_LATEST primary key (lock_type)
@@ -120,7 +120,9 @@ comment on column DB_LOCK_LATEST.lock_acquired_on is
 'The real lock was acquired at this datetime.';
 
 /*==============================================================*/
-/* Widen lock_version from VARCHAR(10) to VARCHAR(50)          */
+/* Backward-compat: widen lock_version on installs created pre-2.0.0
+/* (original CREATE TABLE used VARCHAR(10)). No-op on fresh installs
+/* where the new CREATE TABLE above already declares VARCHAR(50).   */
 /*==============================================================*/
 alter table DB_LOCK alter column lock_version type VARCHAR(50);
 alter table DB_LOCK_HISTORY alter column lock_version type VARCHAR(50);

@@ -4,6 +4,50 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.2.0]
+
+### Added
+- **Multi-database DDL support.** The library now ships creation scripts for
+  MySQL/MariaDB, Oracle (12c+), Microsoft SQL Server (2016+), IBM DB2 LUW
+  (11.5+), and H2 in addition to PostgreSQL. When
+  `opentmf.db-lock.create-tables=true`, the active dialect is auto-detected
+  from the JDBC connection metadata and the matching DDL runs. Runtime lock
+  and unlock queries were already SQL-92 compliant, so no algorithm changes
+  were needed.
+- New property `opentmf.db-lock.dialect` — explicit override for
+  auto-detection (useful when the driver identifies ambiguously, e.g.
+  Aurora-PostgreSQL clones).
+- New property `opentmf.db-lock.ddl-location` — Spring `Resource` location of
+  a user-supplied DDL file, taking precedence over both auto-detection and
+  the `dialect` setting. For dialects the library does not ship out of the
+  box.
+- New `Dialect` enum and `DialectDetector` utility published under
+  `org.opentmf.db.lock.dialect`.
+- New `JdbcHelper.createTables(JdbcTemplate, Dialect)` and
+  `JdbcHelper.createTables(JdbcTemplate, Resource)` overloads.
+- Testcontainers-backed integration tests across every supported dialect.
+  PostgreSQL, MySQL, and H2 run in the default build; Oracle, SQL Server, and
+  DB2 are gated behind the `heavy-it` Maven profile
+  (`mvn -P heavy-it verify`) because of their container boot times.
+
+### Changed
+- `src/main/resources/db/creation_script.sql` renamed to
+  `db/postgresql.sql`. The initial `CREATE TABLE` definitions now declare
+  `lock_version` as `VARCHAR(50)` directly, while the idempotent
+  `ALTER … TYPE` statements introduced in 2.0.0 are retained so installs
+  upgrading straight from a 1.x release (original `VARCHAR(10)`) are still
+  widened correctly.
+- Documentation on `DbLockProperties.createTables` no longer implies
+  PostgreSQL is the only supported target — the full dialect list is
+  documented.
+
+### Deprecated
+- `JdbcHelper.createTables(JdbcTemplate)` — use the new
+  `createTables(JdbcTemplate, Dialect)` or
+  `createTables(JdbcTemplate, Resource)` overloads. The old one defaults to
+  `Dialect.POSTGRESQL` for source compatibility and will be removed in a
+  future major.
+
 ## [2.1.0] - 2026-04-17
 
 ### Added

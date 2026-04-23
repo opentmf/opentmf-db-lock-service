@@ -1,18 +1,20 @@
 package org.opentmf.db.lock.util;
 
+import org.opentmf.db.lock.dialect.Dialect;
 import org.opentmf.db.lock.model.LatestLock;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.sql.Statement;
 import java.time.OffsetDateTime;
 import java.util.Objects;
 import javax.sql.DataSource;
 import lombok.Generated;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.core.io.ClassPathResource;
+import org.springframework.core.io.Resource;
+import org.springframework.core.io.support.EncodedResource;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.init.ScriptUtils;
 import org.jspecify.annotations.NonNull;
@@ -59,7 +61,12 @@ public final class JdbcHelper {
 
   public static int autoIncrementInsert(Connection conn, String sql, String... param)
       throws SQLException {
-    try (PreparedStatement ps = conn.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
+    // Most drivers return the auto-increment value via Statement.RETURN_GENERATED_KEYS, but
+    // Oracle returns the ROWID unless the caller names the column(s) to return. Naming the
+    // "id" column works across all supported dialects — we just have to pick the correct
+    // identifier case (Oracle / DB2 / H2 fold unquoted names to upper case).
+    String[] idColumn = { conn.getMetaData().storesUpperCaseIdentifiers() ? "ID" : "id" };
+    try (PreparedStatement ps = conn.prepareStatement(sql, idColumn)) {
       for (int i = 0, n = param.length; i < n; i++) {
         ps.setString(i + 1, param[i]);
       }
@@ -111,16 +118,56 @@ public final class JdbcHelper {
     }
   }
 
-  public static void createTables(JdbcTemplate jdbcTemplate) {
-    log.debug("In dbLockService.createTables()...");
+  /**
+   * Executes the DDL script shipped for the given {@link Dialect}, honoring its configured
+   * statement separator.
+   */
+  public static void createTables(JdbcTemplate jdbcTemplate, Dialect dialect) {
+    executeDdlScript(
+        jdbcTemplate,
+        new ClassPathResource(dialect.getDdlResourcePath()),
+        dialect.getStatementSeparator());
+  }
+
+  /**
+   * Executes an arbitrary DDL script against the data source backing {@code jdbcTemplate} using
+   * the default {@code ";"} statement separator. Caller is responsible for ensuring the script
+   * is idempotent when {@code createTables} is enabled across restarts.
+   */
+  public static void createTables(JdbcTemplate jdbcTemplate, Resource ddlScript) {
+    executeDdlScript(jdbcTemplate, ddlScript, ScriptUtils.DEFAULT_STATEMENT_SEPARATOR);
+  }
+
+  private static void executeDdlScript(
+      JdbcTemplate jdbcTemplate, Resource ddlScript, String separator) {
+    log.debug("In dbLockService.createTables() with script = {} (separator = '{}')",
+        ddlScript, separator);
     DataSource dataSource = jdbcTemplate.getDataSource();
     Assert.notNull(dataSource, "DataSource cannot be obtained during DB_Lock service init");
     try (Connection conn = dataSource.getConnection()) {
       logMetaData(conn.getMetaData(), conn.getSchema());
-      ScriptUtils.executeSqlScript(conn, new ClassPathResource("db/creation_script.sql"));
+      ScriptUtils.executeSqlScript(
+          conn,
+          new EncodedResource(ddlScript),
+          false,
+          false,
+          ScriptUtils.DEFAULT_COMMENT_PREFIX,
+          separator,
+          ScriptUtils.DEFAULT_BLOCK_COMMENT_START_DELIMITER,
+          ScriptUtils.DEFAULT_BLOCK_COMMENT_END_DELIMITER);
     } catch (SQLException e) {
       throw new IllegalStateException("Unable to initialize the database.", e);
     }
+  }
+
+  /**
+   * @deprecated Use {@link #createTables(JdbcTemplate, Dialect)} or
+   *     {@link #createTables(JdbcTemplate, Resource)}. Defaults to
+   *     {@link Dialect#POSTGRESQL} for source compatibility.
+   */
+  @Deprecated(since = "2.2.0")
+  public static void createTables(JdbcTemplate jdbcTemplate) {
+    createTables(jdbcTemplate, Dialect.POSTGRESQL);
   }
 
   private static void logMetaData(DatabaseMetaData metaData, String schema) throws SQLException {
