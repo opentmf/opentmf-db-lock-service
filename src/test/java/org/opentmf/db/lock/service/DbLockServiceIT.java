@@ -3,6 +3,7 @@ package org.opentmf.db.lock.service;
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
+import java.time.OffsetDateTime;
 import java.util.concurrent.TimeUnit;
 import lombok.extern.slf4j.Slf4j;
 import org.junit.jupiter.api.Assertions;
@@ -16,6 +17,7 @@ import org.opentmf.db.lock.model.AcquiredLock;
 import org.opentmf.db.lock.model.LockType;
 import org.opentmf.db.lock.service.api.DbLockService;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.SpringBootTest.WebEnvironment;
 import org.springframework.test.annotation.DirtiesContext;
@@ -32,6 +34,31 @@ class DbLockServiceIT {
 
   @Autowired
   private DbLockService dbLockService;
+
+  @Autowired
+  private JdbcTemplate jdbcTemplate;
+
+  @Test
+  void testAcquireLock_whenExistingLockExceededHoldTimeout_reclaimsStaleLockAndAcquires()
+      throws DbLockException {
+    LockType lockType = LockType.LOCK_Z;
+    // Simulate a stale lock left behind by a crashed holder: insert a DB_LOCK row directly with a
+    // created_on far in the past, so no auto-release timer is registered for it and its
+    // hold-timeout (2000ms) is already long exceeded.
+    jdbcTemplate.update(
+        "insert into DB_LOCK (lock_type, lock_version, hostname, created_on) values (?, ?, ?, ?)",
+        lockType.getDbValue(), "9.9", "dead-host", OffsetDateTime.now().minusSeconds(60));
+    Assertions.assertTrue(dbLockService.hasLock(lockType));
+
+    // Acquisition must reclaim the stale lock and succeed, rather than timing out waiting for the
+    // dead holder to release.
+    AcquiredLock lock = dbLockService.acquireLock(lockType, "1.0");
+    Assertions.assertNotNull(lock);
+    Assertions.assertEquals("1.0", lock.getLockVersion());
+
+    dbLockService.releaseLock(lock, true);
+    Assertions.assertTrue(lockDoesNotExist(lockType));
+  }
 
   @Test
   void testAcquireLock_andThenReleaseTheLockOnTime_isSuccessful() throws DbLockException {

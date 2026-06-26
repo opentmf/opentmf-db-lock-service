@@ -77,6 +77,9 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
   private static final String SQL_SELECT_ALL_LOCKS =
       "select id, lock_type, lock_version, hostname, created_on from DB_LOCK";
 
+  private static final String SQL_SELECT_LOCK_BY_TYPE =
+      "select id, lock_version, hostname, created_on from DB_LOCK where lock_type = ?";
+
   @Override
   public AcquiredLock acquireLock(LockType lockType, String lockVersion) throws DbLockException {
     Connection conn = null;
@@ -157,6 +160,12 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
               "%d millis. Giving up.", lockType, lockHelper.getLockAcquireTimeout(lockType));
           throw new DbLockTimeoutException(message);
         }
+        if (reclaimStaleLock(conn, lockType)) {
+          // The existing lock had exceeded its hold-timeout and was reclaimed (almost certainly
+          // left behind by a crashed or hung holder). Retry the insert immediately instead of
+          // waiting for the next poll.
+          continue;
+        }
         log.debug("Sleeping {} milliseconds before re-attempting to acquire {} lock.",
             lockHelper.getLockAcquirePollInterval(lockType), lockType);
         sleepUntilNextPoll(lockType);
@@ -170,6 +179,71 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
     } catch (InterruptedException ignored) {
       Thread.currentThread().interrupt();
     }
+  }
+
+  /**
+   * Attempts to reclaim the lock currently held for {@code lockType} when it has already exceeded
+   * its configured lock-hold-timeout. Such a lock is almost certainly stale — left behind by a
+   * holder that crashed, was OOM-killed, or hung — so instead of blocking until that holder
+   * restarts, we release it here (recording it in history first) and let the caller re-attempt the
+   * insert immediately. This is the on-demand counterpart to the startup-only
+   * {@link #removeStaleLocks()}.
+   *
+   * <p>The delete is keyed on the specific lock id observed to be stale, never on {@code lock_type}
+   * alone. That keeps the reclaim safe under contention: if another instance replaced the stale
+   * lock with a fresh one between our read and our delete, the delete matches zero rows and the new
+   * holder is left untouched.
+   *
+   * @return {@code true} if a stale lock row was reclaimed; {@code false} if there was no lock, it
+   *     was not yet stale, another instance reclaimed it first, or the attempt failed.
+   */
+  private boolean reclaimStaleLock(Connection conn, LockType lockType) {
+    try {
+      ExistingLock existing = fetchExistingLock(conn, lockType);
+      if (existing == null) {
+        return false;
+      }
+      long holdTimeout = lockHelper.getLockHoldTimeout(lockType);
+      OffsetDateTime expiresAt = existing.createdOn().plus(holdTimeout, ChronoUnit.MILLIS);
+      if (!expiresAt.isBefore(OffsetDateTime.now())) {
+        return false;
+      }
+      long staleSecs = ChronoUnit.SECONDS.between(expiresAt, OffsetDateTime.now());
+      log.warn("Reclaiming stale lock before acquiring {}: id={}, version={}, hostname={}, "
+              + "created_on={} (expired {}s ago, holdTimeout={}ms)",
+          lockType, existing.id(), existing.lockVersion(), existing.hostname(),
+          existing.createdOn(), staleSecs, holdTimeout);
+      JdbcHelper.executeUpdate(conn, SQL_INSERT_HISTORY, existing.id());
+      int deleted = JdbcHelper.executeUpdate(conn, SQL_DELETE_LOCK, existing.id(),
+          lockType.getDbValue());
+      JdbcHelper.commit(conn);
+      return deleted > 0;
+    } catch (SQLException e) {
+      JdbcHelper.rollback(conn);
+      log.warn("Failed to reclaim stale lock for {}; will retry acquisition normally.",
+          lockType, e);
+      return false;
+    }
+  }
+
+  private ExistingLock fetchExistingLock(Connection conn, LockType lockType) throws SQLException {
+    try (PreparedStatement ps = conn.prepareStatement(SQL_SELECT_LOCK_BY_TYPE)) {
+      ps.setString(1, lockType.getDbValue());
+      try (ResultSet rs = ps.executeQuery()) {
+        if (!rs.next()) {
+          return null;
+        }
+        return new ExistingLock(
+            rs.getInt("id"),
+            rs.getString("lock_version"),
+            rs.getString("hostname"),
+            rs.getObject("created_on", OffsetDateTime.class));
+      }
+    }
+  }
+
+  private record ExistingLock(
+      int id, String lockVersion, String hostname, OffsetDateTime createdOn) {
   }
 
   private void createLockReleaseTimer(AcquiredLock acquiredLock) {

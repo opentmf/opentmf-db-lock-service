@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.2.1] - 2026-06-26
+
+### Added
+- **On-demand stale-lock reclaim during acquisition.** When `acquireLock`
+  finds the lock already held and that lock has exceeded its configured
+  `lock-hold-timeout`, it now releases the stale row (recording it in
+  `DB_LOCK_HISTORY` first) and retries the insert immediately, instead of
+  retrying blindly until the acquire-timeout elapses. This recovers locks
+  left behind by crashed, OOM-killed, or hung holders without waiting for an
+  application restart — the on-demand counterpart to the startup-only
+  `removeStaleLocks()`. The reclaim deletes by the specific stale lock id
+  (never by `lock_type` alone), so a fresh lock acquired by another instance
+  in the meantime is never disturbed.
+
 ## [2.2.0]
 
 ### Added
