@@ -9,6 +9,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
+import org.springframework.jdbc.datasource.init.ScriptUtils;
 
 class DialectTest {
 
@@ -41,10 +42,12 @@ class DialectTest {
   }
 
   @Test
-  void statementSeparator_isSlashForOracleAndDb2_semicolonForOthers() {
+  void statementSeparator_isSlashForOracleAndDb2_eofForPostgres_semicolonForOthers() {
     assertEquals("/", Dialect.ORACLE.getStatementSeparator());
     assertEquals("/", Dialect.DB2.getStatementSeparator());
-    assertEquals(";", Dialect.POSTGRESQL.getStatementSeparator());
+    // PostgreSQL runs its script as a single batch: the bundled DDL contains a PL/pgSQL DO block
+    // whose body embeds semicolons, so the whole-script (EOF) separator is used instead of ";".
+    assertEquals(ScriptUtils.EOF_STATEMENT_SEPARATOR, Dialect.POSTGRESQL.getStatementSeparator());
     assertEquals(";", Dialect.MYSQL.getStatementSeparator());
     assertEquals(";", Dialect.SQLSERVER.getStatementSeparator());
     assertEquals(";", Dialect.H2.getStatementSeparator());

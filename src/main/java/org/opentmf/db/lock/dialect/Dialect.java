@@ -2,6 +2,7 @@ package org.opentmf.db.lock.dialect;
 
 import java.util.Arrays;
 import java.util.Locale;
+import org.springframework.jdbc.datasource.init.ScriptUtils;
 
 /**
  * Supported SQL dialects for the bundled lock-table DDL scripts.
@@ -14,7 +15,9 @@ import java.util.Locale;
  */
 public enum Dialect {
 
-  POSTGRESQL("postgresql", "db/postgresql.sql", ";"),
+  // PostgreSQL DDL runs as a single batch (EOF separator) because postgresql.sql contains a
+  // PL/pgSQL DO block whose body embeds semicolons; see getStatementSeparator() for details.
+  POSTGRESQL("postgresql", "db/postgresql.sql", ScriptUtils.EOF_STATEMENT_SEPARATOR),
   MYSQL("mysql", "db/mysql.sql", ";"),
   ORACLE("oracle", "db/oracle.sql", "/"),
   SQLSERVER("sqlserver", "db/sqlserver.sql", ";"),
@@ -46,9 +49,12 @@ public enum Dialect {
   }
 
   /**
-   * Returns the statement separator used by the bundled DDL script. Defaults to {@code ";"};
+   * Returns the statement separator used by the bundled DDL script. Most dialects use {@code ";"}.
    * Oracle and DB2 use {@code "/"} because their scripts contain anonymous PL/SQL / compound-SQL
-   * blocks that embed literal semicolons.
+   * blocks that embed literal semicolons. PostgreSQL uses
+   * {@link ScriptUtils#EOF_STATEMENT_SEPARATOR} so its script runs as a single batch: it contains a
+   * PL/pgSQL {@code DO} block whose body embeds semicolons, and {@code "/"} cannot serve as a
+   * separator there because the script also uses block-comment banners that would collide with it.
    */
   public String getStatementSeparator() {
     return statementSeparator;

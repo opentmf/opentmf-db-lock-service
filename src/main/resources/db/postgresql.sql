@@ -121,11 +121,43 @@ comment on column DB_LOCK_LATEST.lock_acquired_on is
 
 /*==============================================================*/
 /* Backward-compat: widen lock_version on installs created pre-2.0.0
-/* (original CREATE TABLE used VARCHAR(10)). No-op on fresh installs
-/* where the new CREATE TABLE above already declares VARCHAR(50).   */
+   (original CREATE TABLE used VARCHAR(10)). Fresh installs already
+   declare VARCHAR(50) in the CREATE TABLE statements above.
+
+   Each widening is guarded so the ALTER runs only when the column is
+   still narrower than VARCHAR(50). This makes the migration idempotent:
+   on an already-migrated (or fresh) schema the guard skips the ALTER,
+   so no ACCESS EXCLUSIVE table lock is taken on every application start.
+   Re-taking that exclusive lock on every boot could otherwise form a
+   lock cycle (deadlock) when several application contexts share one
+   database and start concurrently. Widening never truncates, so the
+   one-time migration of a legacy VARCHAR(10) column is preserved. */
 /*==============================================================*/
-alter table DB_LOCK alter column lock_version type VARCHAR(50);
-alter table DB_LOCK_HISTORY alter column lock_version type VARCHAR(50);
-alter table DB_LOCK_LATEST alter column lock_version type VARCHAR(50);
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.columns
+             WHERE table_name = 'db_lock' AND column_name = 'lock_version'
+               AND character_maximum_length IS DISTINCT FROM 50) THEN
+    ALTER TABLE DB_LOCK ALTER COLUMN lock_version TYPE VARCHAR(50);
+  END IF;
+END $$;
+
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.columns
+             WHERE table_name = 'db_lock_history' AND column_name = 'lock_version'
+               AND character_maximum_length IS DISTINCT FROM 50) THEN
+    ALTER TABLE DB_LOCK_HISTORY ALTER COLUMN lock_version TYPE VARCHAR(50);
+  END IF;
+END $$;
+
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.columns
+             WHERE table_name = 'db_lock_latest' AND column_name = 'lock_version'
+               AND character_maximum_length IS DISTINCT FROM 50) THEN
+    ALTER TABLE DB_LOCK_LATEST ALTER COLUMN lock_version TYPE VARCHAR(50);
+  END IF;
+END $$;
 
 commit transaction;
