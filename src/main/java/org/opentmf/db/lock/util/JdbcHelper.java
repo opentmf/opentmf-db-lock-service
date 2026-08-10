@@ -190,12 +190,26 @@ public final class JdbcHelper {
     }
   }
 
+  /**
+   * Returns an open connection with auto-commit disabled. Ownership passes to the caller, which
+   * must close it — every call site does so in a {@code finally} via {@link #close(Connection)}.
+   *
+   * <p>The {@code setAutoCommit} call is guarded because it happens after the connection has been
+   * handed over by the pool but before the caller can see it: if it throws, the caller never
+   * receives the reference and cannot close it, so the connection would leak out of the pool for
+   * good. Repeated over a flapping database that is exactly how a pool gets exhausted.
+   */
   public static Connection getConnection(JdbcTemplate jdbcTemplate)
       throws SQLException {
     DataSource dataSource = Objects.requireNonNull(jdbcTemplate.getDataSource());
     Connection conn = dataSource.getConnection();
-    conn.setAutoCommit(false);
-    return conn;
+    try {
+      conn.setAutoCommit(false);
+      return conn;
+    } catch (SQLException e) {
+      close(conn);
+      throw e;
+    }
   }
 
   private static void logSql(PreparedStatement ps) {

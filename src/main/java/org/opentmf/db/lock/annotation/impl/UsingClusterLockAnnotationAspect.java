@@ -40,10 +40,7 @@ public class UsingClusterLockAnnotationAspect {
     try {
       lock = dbLockService.acquireLock(usingClusterLock.lockType(), requestedVersion);
 
-      if (lock.isUpgrade() ||
-          (lock.isDowngrade() && lock.isDowngradeAllowed(downgradeAllowedMillis)) ||
-          (lock.isSameVersion() && usingClusterLock.executeOnSameVersion())) {
-
+      if (shouldExecute(lock, usingClusterLock, downgradeAllowedMillis)) {
         LockContext ctx = enrichFirstLockContextIfAny(pjp, lock);
 
         // Execute the actual business logic
@@ -55,19 +52,15 @@ public class UsingClusterLockAnnotationAspect {
         lockReleased = true;
 
         return result;
-      } else {
-        log.debug("Requested lock version is already the latest. Not calling service method.");
-        dbLockService.releaseLock(lock, false);
-        lockReleased = true;
       }
+
+      log.debug("Requested lock version is already the latest. Not calling service method.");
+      dbLockService.releaseLock(lock, false);
+      lockReleased = true;
 
     } catch (Exception e) {
       if (lock != null) {
-        try {
-          dbLockService.releaseLock(lock, false);
-        } catch (DbLockException releaseEx) {
-          e.addSuppressed(releaseEx);
-        }
+        releaseSuppressing(lock, e);
         lockReleased = true;
       }
       if (!failureMessage.isEmpty()) {
@@ -75,15 +68,46 @@ public class UsingClusterLockAnnotationAspect {
       }
       throw e;
     } finally {
+      // Safety net for a Throwable the catch above does not handle -- an Error thrown by the
+      // advised method would otherwise leave the lock held until its hold-timeout expires.
       if (!lockReleased && lock != null) {
-        try {
-          dbLockService.releaseLock(lock, false);
-        } catch (DbLockException ignored) {
-          // best-effort cleanup; primary failure has already been propagated
-        }
+        releaseQuietly(lock);
       }
     }
     return null;
+  }
+
+  /**
+   * Whether the advised method should run for this lock: an upgrade always, a downgrade only once
+   * the configured grace period has passed, and a re-run of the same version only when the
+   * annotation opts in.
+   */
+  private boolean shouldExecute(AcquiredLock lock, UsingClusterLock usingClusterLock,
+      long downgradeAllowedMillis) {
+    return lock.isUpgrade()
+        || (lock.isDowngrade() && lock.isDowngradeAllowed(downgradeAllowedMillis))
+        || (lock.isSameVersion() && usingClusterLock.executeOnSameVersion());
+  }
+
+  /**
+   * Releases the lock while a failure is already propagating, attaching any release failure to it
+   * so the original cause stays the primary exception.
+   */
+  private void releaseSuppressing(AcquiredLock lock, Throwable primary) {
+    try {
+      dbLockService.releaseLock(lock, false);
+    } catch (DbLockException releaseEx) {
+      primary.addSuppressed(releaseEx);
+    }
+  }
+
+  /** Best-effort release; the primary failure has already been propagated. */
+  private void releaseQuietly(AcquiredLock lock) {
+    try {
+      dbLockService.releaseLock(lock, false);
+    } catch (DbLockException ignored) {
+      // nothing useful to do here -- the caller is already unwinding
+    }
   }
 
   private String resolveProperty(String value) throws DbLockException {

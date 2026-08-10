@@ -5,6 +5,7 @@ import java.sql.DatabaseMetaData;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.util.List;
 import java.util.Locale;
 import javax.sql.DataSource;
 import lombok.Generated;
@@ -46,7 +47,24 @@ public final class LockVersionMigration {
 
   private static final int REQUIRED_LENGTH = 50;
   private static final String COLUMN = "lock_version";
-  private static final String[] TABLES = {"DB_LOCK", "DB_LOCK_HISTORY", "DB_LOCK_LATEST"};
+
+  /**
+   * The tables carrying a {@code lock_version} column, each paired with its complete widening
+   * statement. The statements are written out as literals rather than assembled at runtime: no
+   * caller-supplied value goes anywhere near this SQL, and spelling it out keeps that true by
+   * construction instead of by argument. The 50 in each literal is {@link #REQUIRED_LENGTH};
+   * the two are checked against each other by {@code lockVersionWidening_*} in DialectPostgresIT.
+   */
+  private static final List<WideningTarget> TARGETS = List.of(
+      new WideningTarget("DB_LOCK",
+          "alter table DB_LOCK alter column lock_version type VARCHAR(50)"),
+      new WideningTarget("DB_LOCK_HISTORY",
+          "alter table DB_LOCK_HISTORY alter column lock_version type VARCHAR(50)"),
+      new WideningTarget("DB_LOCK_LATEST",
+          "alter table DB_LOCK_LATEST alter column lock_version type VARCHAR(50)"));
+
+  private record WideningTarget(String table, String widenSql) {
+  }
 
   @Generated
   private LockVersionMigration() {
@@ -69,24 +87,23 @@ public final class LockVersionMigration {
     DataSource dataSource = jdbcTemplate.getDataSource();
     Assert.notNull(dataSource, "DataSource cannot be obtained during lock_version migration");
     try (Connection conn = dataSource.getConnection()) {
-      for (String table : TABLES) {
-        widenIfNarrow(conn, table);
+      for (WideningTarget target : TARGETS) {
+        widenIfNarrow(conn, target);
       }
     } catch (SQLException e) {
       log.warn("Could not verify or widen the {} column; leaving the schema as-is.", COLUMN, e);
     }
   }
 
-  private static void widenIfNarrow(Connection conn, String table) throws SQLException {
-    int width = columnWidth(conn, table);
+  private static void widenIfNarrow(Connection conn, WideningTarget target) throws SQLException {
+    int width = columnWidth(conn, target.table());
     if (width <= 0 || width >= REQUIRED_LENGTH) {
       return;
     }
     log.warn("Widening {}.{} from VARCHAR({}) to VARCHAR({}) (pre-2.0.0 schema).",
-        table, COLUMN, width, REQUIRED_LENGTH);
+        target.table(), COLUMN, width, REQUIRED_LENGTH);
     try (Statement st = conn.createStatement()) {
-      st.execute("alter table " + table + " alter column " + COLUMN
-          + " type VARCHAR(" + REQUIRED_LENGTH + ")");
+      st.execute(target.widenSql());
     }
   }
 
