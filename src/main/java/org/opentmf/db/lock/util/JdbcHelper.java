@@ -166,8 +166,14 @@ public final class JdbcHelper {
    * @deprecated Use {@link #createTables(JdbcTemplate, Dialect)} or
    *     {@link #createTables(JdbcTemplate, Resource)}. Defaults to
    *     {@link Dialect#POSTGRESQL} for source compatibility.
+   *
+   *     <p>Scheduled for removal in 3.0.0. No caller is known — nothing in this repository uses
+   *     it, and no other project in the ecosystem references {@code JdbcHelper} at all — but it
+   *     is published API, so dropping it is a binary-compatibility break that belongs in a major
+   *     release rather than a patch. Delete it, and its {@code java:S1133} suppression in
+   *     SonarQube, as part of cutting 3.0.0.
    */
-  @Deprecated(since = "2.2.0")
+  @Deprecated(since = "2.2.0", forRemoval = true)
   public static void createTables(JdbcTemplate jdbcTemplate) {
     createTables(jdbcTemplate, Dialect.POSTGRESQL);
   }
