@@ -4,6 +4,44 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.2.2] - 2026-08-10
+
+### Fixed
+- **PostgreSQL: no more `ACCESS EXCLUSIVE` table lock on every startup.** The
+  bundled `db/postgresql.sql` re-ran the legacy `lock_version`
+  `VARCHAR(10)` → `VARCHAR(50)` widening unconditionally on each boot (present
+  since 2.0.0). Each `ALTER` takes an `ACCESS EXCLUSIVE` lock even when the
+  column is already 50, which could form a lock cycle and surface as
+  `PSQLException: ERROR: deadlock detected` at startup when several
+  application contexts share one database and boot concurrently. The widening
+  has moved out of the DDL into the new `LockVersionMigration`, which reads
+  the column width through JDBC metadata and issues the `ALTER` only when the
+  column is genuinely narrower than 50. Fresh and already-migrated installs
+  now execute no statement at all, so they take the lock zero times; a legacy
+  `VARCHAR(10)` install is still widened once. A column an operator
+  deliberately widened past 50 is left alone rather than narrowed back.
+
+### Added
+- `LockVersionMigration` (package `org.opentmf.db.lock.dialect`), invoked
+  automatically by `JdbcHelper.createTables(JdbcTemplate, Dialect)`. Scoped to
+  the connection's own catalog and schema, so a same-named legacy table
+  belonging to another tenant in the same database cannot trigger a widening.
+  A no-op for every dialect other than PostgreSQL — no other dialect ever had
+  a `VARCHAR(10)` era.
+
+### Changed
+- `db/postgresql.sql` stays plain, `;`-separated DDL with no PL/pgSQL `DO`
+  block, so it remains runnable on PostgreSQL-compatible engines that do not
+  support anonymous blocks, and remains usable as a `ddl-location` template.
+- **Spring Boot BOM 4.0.5 → 4.1.0.** Every BOM-managed dependency moves with
+  it, so consumers inheriting versions from this library will see transitive
+  upgrades (Spring Framework, Jackson, Logback, the JDBC drivers). The library
+  itself is source- and behaviour-compatible; the full test matrix — including
+  the `heavy-it` Oracle / SQL Server / DB2 suites — passes unchanged.
+- Build tooling upgraded: ArchUnit 1.5.0, JaCoCo 0.8.15, Sonar scanner
+  5.7.0.6970, Surefire/Failsafe 3.5.6, Enforcer 3.6.3, and the Central
+  publishing plugin 0.11.0.
+
 ## [2.2.1] - 2026-06-26
 
 ### Added

@@ -120,12 +120,21 @@ comment on column DB_LOCK_LATEST.lock_acquired_on is
 'The real lock was acquired at this datetime.';
 
 /*==============================================================*/
-/* Backward-compat: widen lock_version on installs created pre-2.0.0
-/* (original CREATE TABLE used VARCHAR(10)). No-op on fresh installs
-/* where the new CREATE TABLE above already declares VARCHAR(50).   */
+/* Backward-compat: installs created pre-2.0.0 declared lock_version
+   as VARCHAR(10) and must be widened to the VARCHAR(50) used by the
+   CREATE TABLE statements above.
+
+   That widening is NOT done here. An ALTER in this script would run on
+   every application start and take an ACCESS EXCLUSIVE table lock even
+   when the column is already 50, which can form a lock cycle (deadlock)
+   when several application contexts share one database and start
+   concurrently. Expressing the guard in SQL would need a PL/pgSQL DO
+   block, which this script deliberately avoids so it stays plain,
+   ;-separated DDL that PostgreSQL-compatible engines can also run.
+
+   The widening now lives in LockVersionMigration, which runs right after
+   this script: it reads the column width through JDBC metadata and issues
+   the ALTER only when the column is genuinely narrower than 50. */
 /*==============================================================*/
-alter table DB_LOCK alter column lock_version type VARCHAR(50);
-alter table DB_LOCK_HISTORY alter column lock_version type VARCHAR(50);
-alter table DB_LOCK_LATEST alter column lock_version type VARCHAR(50);
 
 commit transaction;
