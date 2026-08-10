@@ -33,6 +33,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - `db/postgresql.sql` stays plain, `;`-separated DDL with no PL/pgSQL `DO`
   block, so it remains runnable on PostgreSQL-compatible engines that do not
   support anonymous blocks, and remains usable as a `ddl-location` template.
+- **Spring Boot BOM 4.0.5 → 4.1.0.** Every BOM-managed dependency moves with
+  it, so consumers inheriting versions from this library will see transitive
+  upgrades (Spring Framework, Jackson, Logback, the JDBC drivers). The library
+  itself is source- and behaviour-compatible; the full test matrix — including
+  the `heavy-it` Oracle / SQL Server / DB2 suites — passes unchanged.
+- Build tooling upgraded: ArchUnit 1.5.0, JaCoCo 0.8.15, Sonar scanner
+  5.7.0.6970, Surefire/Failsafe 3.5.6, Enforcer 3.6.3, and the Central
+  publishing plugin 0.11.0.
 
 ## [2.2.1] - 2026-06-26
 
