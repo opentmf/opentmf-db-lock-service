@@ -4,6 +4,31 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.2.2] - 2026-08-10
+
+### Fixed
+- **PostgreSQL: no more `ACCESS EXCLUSIVE` table lock on every startup.** The
+  bundled `db/postgresql.sql` re-ran the legacy `lock_version`
+  `VARCHAR(10)` → `VARCHAR(50)` widening unconditionally on each boot (present
+  since 2.0.0). Each `ALTER` takes an `ACCESS EXCLUSIVE` lock even when the
+  column is already 50, which could form a lock cycle and surface as
+  `PSQLException: ERROR: deadlock detected` at startup when several
+  application contexts share one database and boot concurrently. The widening
+  is now guarded so the `ALTER` runs only on a column still narrower than 50,
+  qualified to the current schema. Fresh and already-migrated installs take
+  the lock zero times; a legacy `VARCHAR(10)` install is still widened once.
+  A column an operator deliberately widened past 50 (or to `text`) is left
+  alone rather than narrowed.
+
+### Changed
+- `Dialect.POSTGRESQL.getStatementSeparator()` now returns
+  `ScriptUtils.EOF_STATEMENT_SEPARATOR` instead of `";"`, so the PostgreSQL
+  DDL runs as a single batch — its guard is a PL/pgSQL `DO` block whose body
+  embeds semicolons. This is internal to `createTables(JdbcTemplate, Dialect)`,
+  but the enum is public: anything reusing that value to split its *own*
+  `;`-separated script must now pass `";"` explicitly. The user-supplied
+  `ddl-location` path is unaffected — it still uses `";"`.
+
 ## [2.2.1] - 2026-06-26
 
 ### Added

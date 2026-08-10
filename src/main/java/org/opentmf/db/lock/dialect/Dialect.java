@@ -51,10 +51,19 @@ public enum Dialect {
   /**
    * Returns the statement separator used by the bundled DDL script. Most dialects use {@code ";"}.
    * Oracle and DB2 use {@code "/"} because their scripts contain anonymous PL/SQL / compound-SQL
-   * blocks that embed literal semicolons. PostgreSQL uses
-   * {@link ScriptUtils#EOF_STATEMENT_SEPARATOR} so its script runs as a single batch: it contains a
-   * PL/pgSQL {@code DO} block whose body embeds semicolons, and {@code "/"} cannot serve as a
-   * separator there because the script also uses block-comment banners that would collide with it.
+   * blocks that embed literal semicolons.
+   *
+   * <p>PostgreSQL uses {@link ScriptUtils#EOF_STATEMENT_SEPARATOR}, so its script is handed to the
+   * driver as one batch rather than being split: it contains a PL/pgSQL {@code DO} block (the
+   * legacy {@code lock_version} widening guard) whose body embeds semicolons. PostgreSQL executes
+   * a multi-statement batch natively, so the script keeps its ordinary {@code ";"} punctuation
+   * instead of being re-written around a {@code "/"} separator the way the Oracle and DB2 scripts
+   * are. The trade-off is error reporting: a failure surfaces as one exception carrying the whole
+   * script rather than naming the individual statement that failed.
+   *
+   * <p>Note for callers: this value is dialect-specific and not a general-purpose default. Code
+   * splitting its own {@code ";"}-separated script should pass {@code ";"} explicitly rather than
+   * borrow this. The user-supplied {@code ddl-location} path deliberately does exactly that.
    */
   public String getStatementSeparator() {
     return statementSeparator;

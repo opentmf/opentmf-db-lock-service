@@ -124,40 +124,39 @@ comment on column DB_LOCK_LATEST.lock_acquired_on is
    (original CREATE TABLE used VARCHAR(10)). Fresh installs already
    declare VARCHAR(50) in the CREATE TABLE statements above.
 
-   Each widening is guarded so the ALTER runs only when the column is
-   still narrower than VARCHAR(50). This makes the migration idempotent:
-   on an already-migrated (or fresh) schema the guard skips the ALTER,
-   so no ACCESS EXCLUSIVE table lock is taken on every application start.
-   Re-taking that exclusive lock on every boot could otherwise form a
-   lock cycle (deadlock) when several application contexts share one
-   database and start concurrently. Widening never truncates, so the
-   one-time migration of a legacy VARCHAR(10) column is preserved. */
+   The widening is guarded so the ALTER runs only when the column is
+   still strictly narrower than VARCHAR(50). This makes the migration
+   idempotent: on an already-migrated (or fresh) schema the guard skips
+   the ALTER, so no ACCESS EXCLUSIVE table lock is taken on every
+   application start. Re-taking that exclusive lock on every boot could
+   otherwise form a lock cycle (deadlock) when several application
+   contexts share one database and start concurrently.
+
+   Two details the predicate has to get right:
+   - It is `< 50`, not `<> 50`. A column an operator deliberately widened
+     past 50 (or to unbounded `text`, where character_maximum_length is
+     NULL and the comparison is therefore never true) must be left alone;
+     re-typing it to VARCHAR(50) would narrow it and abort startup on any
+     row longer than 50 characters.
+   - It is qualified by `table_schema = current_schema()`. information_schema
+     spans every schema the role can see, so without this an unrelated
+     tenant's legacy DB_LOCK elsewhere in the same database would make the
+     guard true and re-ALTER our own already-widened table on every boot --
+     precisely the multi-schema shared-database case this guard exists for. */
 /*==============================================================*/
 DO $$
+DECLARE
+  target_table text;
 BEGIN
-  IF EXISTS (SELECT 1 FROM information_schema.columns
-             WHERE table_name = 'db_lock' AND column_name = 'lock_version'
-               AND character_maximum_length IS DISTINCT FROM 50) THEN
-    ALTER TABLE DB_LOCK ALTER COLUMN lock_version TYPE VARCHAR(50);
-  END IF;
-END $$;
-
-DO $$
-BEGIN
-  IF EXISTS (SELECT 1 FROM information_schema.columns
-             WHERE table_name = 'db_lock_history' AND column_name = 'lock_version'
-               AND character_maximum_length IS DISTINCT FROM 50) THEN
-    ALTER TABLE DB_LOCK_HISTORY ALTER COLUMN lock_version TYPE VARCHAR(50);
-  END IF;
-END $$;
-
-DO $$
-BEGIN
-  IF EXISTS (SELECT 1 FROM information_schema.columns
-             WHERE table_name = 'db_lock_latest' AND column_name = 'lock_version'
-               AND character_maximum_length IS DISTINCT FROM 50) THEN
-    ALTER TABLE DB_LOCK_LATEST ALTER COLUMN lock_version TYPE VARCHAR(50);
-  END IF;
+  FOREACH target_table IN ARRAY ARRAY['db_lock', 'db_lock_history', 'db_lock_latest'] LOOP
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+               WHERE table_schema = current_schema()
+                 AND table_name = target_table
+                 AND column_name = 'lock_version'
+                 AND character_maximum_length < 50) THEN
+      EXECUTE format('ALTER TABLE %I ALTER COLUMN lock_version TYPE VARCHAR(50)', target_table);
+    END IF;
+  END LOOP;
 END $$;
 
 commit transaction;
