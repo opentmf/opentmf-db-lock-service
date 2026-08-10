@@ -120,43 +120,21 @@ comment on column DB_LOCK_LATEST.lock_acquired_on is
 'The real lock was acquired at this datetime.';
 
 /*==============================================================*/
-/* Backward-compat: widen lock_version on installs created pre-2.0.0
-   (original CREATE TABLE used VARCHAR(10)). Fresh installs already
-   declare VARCHAR(50) in the CREATE TABLE statements above.
+/* Backward-compat: installs created pre-2.0.0 declared lock_version
+   as VARCHAR(10) and must be widened to the VARCHAR(50) used by the
+   CREATE TABLE statements above.
 
-   The widening is guarded so the ALTER runs only when the column is
-   still strictly narrower than VARCHAR(50). This makes the migration
-   idempotent: on an already-migrated (or fresh) schema the guard skips
-   the ALTER, so no ACCESS EXCLUSIVE table lock is taken on every
-   application start. Re-taking that exclusive lock on every boot could
-   otherwise form a lock cycle (deadlock) when several application
-   contexts share one database and start concurrently.
+   That widening is NOT done here. An ALTER in this script would run on
+   every application start and take an ACCESS EXCLUSIVE table lock even
+   when the column is already 50, which can form a lock cycle (deadlock)
+   when several application contexts share one database and start
+   concurrently. Expressing the guard in SQL would need a PL/pgSQL DO
+   block, which this script deliberately avoids so it stays plain,
+   ;-separated DDL that PostgreSQL-compatible engines can also run.
 
-   Two details the predicate has to get right:
-   - It is `< 50`, not `<> 50`. A column an operator deliberately widened
-     past 50 (or to unbounded `text`, where character_maximum_length is
-     NULL and the comparison is therefore never true) must be left alone;
-     re-typing it to VARCHAR(50) would narrow it and abort startup on any
-     row longer than 50 characters.
-   - It is qualified by `table_schema = current_schema()`. information_schema
-     spans every schema the role can see, so without this an unrelated
-     tenant's legacy DB_LOCK elsewhere in the same database would make the
-     guard true and re-ALTER our own already-widened table on every boot --
-     precisely the multi-schema shared-database case this guard exists for. */
+   The widening now lives in LockVersionMigration, which runs right after
+   this script: it reads the column width through JDBC metadata and issues
+   the ALTER only when the column is genuinely narrower than 50. */
 /*==============================================================*/
-DO $$
-DECLARE
-  target_table text;
-BEGIN
-  FOREACH target_table IN ARRAY ARRAY['db_lock', 'db_lock_history', 'db_lock_latest'] LOOP
-    IF EXISTS (SELECT 1 FROM information_schema.columns
-               WHERE table_schema = current_schema()
-                 AND table_name = target_table
-                 AND column_name = 'lock_version'
-                 AND character_maximum_length < 50) THEN
-      EXECUTE format('ALTER TABLE %I ALTER COLUMN lock_version TYPE VARCHAR(50)', target_table);
-    END IF;
-  END LOOP;
-END $$;
 
 commit transaction;

@@ -14,20 +14,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   column is already 50, which could form a lock cycle and surface as
   `PSQLException: ERROR: deadlock detected` at startup when several
   application contexts share one database and boot concurrently. The widening
-  is now guarded so the `ALTER` runs only on a column still narrower than 50,
-  qualified to the current schema. Fresh and already-migrated installs take
-  the lock zero times; a legacy `VARCHAR(10)` install is still widened once.
-  A column an operator deliberately widened past 50 (or to `text`) is left
-  alone rather than narrowed.
+  has moved out of the DDL into the new `LockVersionMigration`, which reads
+  the column width through JDBC metadata and issues the `ALTER` only when the
+  column is genuinely narrower than 50. Fresh and already-migrated installs
+  now execute no statement at all, so they take the lock zero times; a legacy
+  `VARCHAR(10)` install is still widened once. A column an operator
+  deliberately widened past 50 is left alone rather than narrowed back.
+
+### Added
+- `LockVersionMigration` (package `org.opentmf.db.lock.dialect`), invoked
+  automatically by `JdbcHelper.createTables(JdbcTemplate, Dialect)`. Scoped to
+  the connection's own catalog and schema, so a same-named legacy table
+  belonging to another tenant in the same database cannot trigger a widening.
+  A no-op for every dialect other than PostgreSQL — no other dialect ever had
+  a `VARCHAR(10)` era.
 
 ### Changed
-- `Dialect.POSTGRESQL.getStatementSeparator()` now returns
-  `ScriptUtils.EOF_STATEMENT_SEPARATOR` instead of `";"`, so the PostgreSQL
-  DDL runs as a single batch — its guard is a PL/pgSQL `DO` block whose body
-  embeds semicolons. This is internal to `createTables(JdbcTemplate, Dialect)`,
-  but the enum is public: anything reusing that value to split its *own*
-  `;`-separated script must now pass `";"` explicitly. The user-supplied
-  `ddl-location` path is unaffected — it still uses `";"`.
+- `db/postgresql.sql` stays plain, `;`-separated DDL with no PL/pgSQL `DO`
+  block, so it remains runnable on PostgreSQL-compatible engines that do not
+  support anonymous blocks, and remains usable as a `ddl-location` template.
 
 ## [2.2.1] - 2026-06-26
 

@@ -1,6 +1,7 @@
 package org.opentmf.db.lock.util;
 
 import org.opentmf.db.lock.dialect.Dialect;
+import org.opentmf.db.lock.dialect.LockVersionMigration;
 import org.opentmf.db.lock.model.LatestLock;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
@@ -127,6 +128,7 @@ public final class JdbcHelper {
         jdbcTemplate,
         new ClassPathResource(dialect.getDdlResourcePath()),
         dialect.getStatementSeparator());
+    LockVersionMigration.widenLockVersion(jdbcTemplate, dialect);
   }
 
   /**
