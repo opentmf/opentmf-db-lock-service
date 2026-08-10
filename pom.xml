@@ -391,16 +391,29 @@
         report and publishes the analysis, printing the dashboard link at the end. Add -P heavy-it
         as well to have the Oracle / SQL Server / DB2 suites counted toward coverage.
 
-        Defaults come from the scanner itself and are deliberately not restated here:
-        sonar.host.url is already http://localhost:9000 and the project key is already
-        groupId:artifactId. Override either on the command line when needed, e.g.
-        -Dsonar.host.url=... , and pass credentials with -Dsonar.token=... (or the SONAR_TOKEN
-        environment variable) rather than storing them in the pom.
+        sonar.host.url MUST be set explicitly. SonarScanner 5.x targets SonarQube Cloud when it
+        is absent, so leaving it out does not fall back to a local server; it sends the analysis
+        to sonarcloud.io and fails with "Failed to query JRE metadata: GET
+        https://api.sonarcloud.io/analysis/jres ... 403 Forbidden". Override on the command line
+        to scan a different server: -Dsonar.host.url=https://sonar.example.com
+
+        JRE provisioning is disabled because this profile targets a local server and the build
+        already runs on the JDK 17 the enforcer pins. That avoids a per-scan JRE download and
+        works against SonarQube versions predating the provisioning endpoint. Drop the property
+        if you would rather let the server supply its own JRE.
+
+        The project key is left at the scanner default (groupId:artifactId). Pass credentials
+        with -Dsonar.token=... or the SONAR_TOKEN environment variable rather than storing them
+        in the pom.
 
         Coverage is picked up by the scanner's own auto-discovery of
         target/site/jacoco/jacoco.xml; sonar.coverage.jacoco.xmlReportPaths is intentionally
         not set, so attribution stays local to this project.
       -->
+      <properties>
+        <sonar.host.url>http://localhost:9000</sonar.host.url>
+        <sonar.scanner.skipJreProvisioning>true</sonar.scanner.skipJreProvisioning>
+      </properties>
       <build>
         <plugins>
           <plugin>
