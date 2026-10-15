@@ -151,6 +151,26 @@ class JdbcHelperTest {
     verify(conn).commit();
   }
 
+  /**
+   * The losers of a concurrent first start fail once the winner's tables appear; the scripts are
+   * idempotent, so one more run on a rolled-back connection finds those tables and succeeds.
+   */
+  @Test
+  void createTables_whenTheFirstRunFails_runsTheScriptOnceMore() throws SQLException {
+    Connection conn = scriptConnection();
+    Statement statement = scriptStatement();
+    when(conn.createStatement()).thenReturn(statement);
+    when(statement.execute(anyString()))
+        .thenThrow(new SQLException("duplicate key value violates unique constraint", "23505"))
+        .thenReturn(false);
+
+    JdbcHelper.createTables(jdbcTemplateReturning(conn), script("create table T (id int);"));
+
+    InOrder order = inOrder(conn);
+    order.verify(conn).rollback();
+    order.verify(conn).commit();
+  }
+
   @Test
   void inTransaction_whenPreparingTheConnectionFails_closesItAndPropagates() throws SQLException {
     Connection conn = mock(Connection.class);

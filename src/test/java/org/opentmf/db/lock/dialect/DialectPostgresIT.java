@@ -12,7 +12,9 @@ import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.Statement;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -160,7 +162,8 @@ class DialectPostgresIT extends AbstractDialectIT {
     JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource());
     for (String table : List.of("db_lock", "db_lock_history", "db_lock_latest")) {
       jdbcTemplate.execute(
-          "create table " + schema + "." + table + " (lock_version VARCHAR(" + LEGACY_LENGTH + "))");
+          "create table " + schema + "." + table
+              + " (lock_version VARCHAR(" + LEGACY_LENGTH + "))");
     }
     try (HikariDataSource pool = pool(schema, false)) {
       LockVersionMigration.widenLockVersion(new JdbcTemplate(pool), Dialect.POSTGRESQL);
@@ -197,7 +200,7 @@ class DialectPostgresIT extends AbstractDialectIT {
     }
   }
 
-  /** The shared waiter scenario on a pool configured for REPEATABLE READ, the protocol's worst case. */
+  /** The shared waiter scenario on a pool set to REPEATABLE READ, the protocol's worst case. */
   @Test
   void aWaiterSeesTheVersionRecordedByTheHolderItWaitedFor_underRepeatableRead()
       throws Exception {
@@ -280,7 +283,8 @@ class DialectPostgresIT extends AbstractDialectIT {
           return null;
         });
         // The second releaser has copied the still-visible row and now waits on the first's delete.
-        await().atMost(Duration.ofSeconds(10)).until(() -> waitingOnARowLock("delete from DB_LOCK"));
+        await().atMost(Duration.ofSeconds(10))
+            .until(() -> waitingOnARowLock("delete from DB_LOCK"));
         firstReleaser.commit();
         second.get(10, TimeUnit.SECONDS);
       } finally {
@@ -291,6 +295,45 @@ class DialectPostgresIT extends AbstractDialectIT {
       assertEquals(1, jdbcTemplate.queryForObject(
           "select count(*) from DB_LOCK_HISTORY where lock_id = ?", Integer.class,
           lock.getLockId()));
+    }
+  }
+
+  /**
+   * Instances starting together against an empty schema must all get their tables. {@code CREATE
+   * TABLE IF NOT EXISTS} is not safe against a concurrent creator on PostgreSQL: once the first
+   * creator commits, the others fail with a duplicate key in {@code pg_class}, and up to 2.2.2 that
+   * failed their startup — two instances out of three, every round, measured.
+   */
+  @Test
+  void instancesStartingTogetherOnAnEmptySchema_allCreateTheTables() throws Exception {
+    for (int round = 0; round < 3; round++) {
+      String schema = freshSchema("first_boot_" + round);
+      List<HikariDataSource> pools = new ArrayList<>();
+      CountDownLatch go = new CountDownLatch(1);
+      ExecutorService executor = Executors.newFixedThreadPool(3);
+      try {
+        List<Future<Void>> starts = new ArrayList<>();
+        for (int i = 0; i < 3; i++) {
+          HikariDataSource pool = pool(schema, true, 1);
+          pools.add(pool);
+          try (Connection warm = pool.getConnection()) {
+            // connected up front, so the instances race on the DDL rather than on connecting
+          }
+          starts.add(executor.submit(() -> {
+            go.await();
+            JdbcHelper.createTables(new JdbcTemplate(pool), Dialect.POSTGRESQL);
+            return null;
+          }));
+        }
+        go.countDown();
+        for (Future<Void> start : starts) {
+          start.get(30, TimeUnit.SECONDS);
+        }
+      } finally {
+        executor.shutdownNow();
+        pools.forEach(HikariDataSource::close);
+      }
+      assertEquals(List.of("db_lock", "db_lock_history", "db_lock_latest"), tablesIn(schema));
     }
   }
 

@@ -17,6 +17,7 @@ import org.springframework.core.io.ClassPathResource;
 import org.springframework.core.io.Resource;
 import org.springframework.core.io.support.EncodedResource;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.init.ScriptException;
 import org.springframework.jdbc.datasource.init.ScriptUtils;
 import org.jspecify.annotations.NonNull;
 import org.springframework.util.Assert;
@@ -148,7 +149,23 @@ public final class JdbcHelper {
     Assert.notNull(dataSource, "DataSource cannot be obtained during DB_Lock service init");
     try (Connection conn = dataSource.getConnection()) {
       logMetaData(conn.getMetaData(), conn.getSchema());
-      executeInOwnTransaction(conn, new EncodedResource(ddlScript), separator);
+      EncodedResource script = new EncodedResource(ddlScript);
+      try {
+        executeInOwnTransaction(conn, script, separator);
+      } catch (SQLException | ScriptException firstAttempt) {
+        // Instances starting together against an empty schema race on CREATE TABLE IF NOT
+        // EXISTS, which PostgreSQL does not guard against a concurrent creator: once the first
+        // one commits, the others fail on a duplicate key in pg_class. The scripts are
+        // idempotent, so one more run, which finds the winner's tables, settles it.
+        log.info("Lock-table DDL failed ({}); running it once more, as another instance starting "
+            + "at the same time may have created the tables first.", firstAttempt.getMessage());
+        try {
+          executeInOwnTransaction(conn, script, separator);
+        } catch (SQLException | ScriptException secondAttempt) {
+          secondAttempt.addSuppressed(firstAttempt);
+          throw secondAttempt;
+        }
+      }
     } catch (SQLException e) {
       throw new IllegalStateException("Unable to initialize the database.", e);
     }
@@ -162,10 +179,10 @@ public final class JdbcHelper {
    * Server, DB2), a pool whose auto-commit default is off rolls back the uncommitted DDL when the
    * connection is returned, so the tables silently never appear. With auto-commit on, a script that
    * opens its own transaction and then fails hands the pool a connection stuck in an aborted
-   * transaction, which pgjdbc will not even let the pool roll back. Committing here makes the script
-   * stick in the first case and keeps it atomic where the engine allows it; rolling back on any
-   * failure, the unchecked {@code ScriptException} included, returns the connection clean in the
-   * second.
+   * transaction, which pgjdbc will not even let the pool roll back. Committing here makes the
+   * script stick in the first case and keeps it atomic where the engine allows it; rolling back on
+   * any failure, the unchecked {@link ScriptException} included, returns the connection clean in
+   * the second.
    */
   private static void executeInOwnTransaction(
       Connection conn, EncodedResource script, String separator) throws SQLException {
