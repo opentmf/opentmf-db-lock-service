@@ -76,9 +76,9 @@ public final class LockVersionMigration {
    * migrated — in particular it issues no statement at all on a healthy schema, so no exclusive
    * table lock is taken on a normal startup.
    *
-   * <p>Failures are logged and swallowed: the widening only matters to installs predating 2.0.0,
-   * and a database that refuses the ALTER (say, a read-only role) should not prevent an otherwise
-   * healthy application from starting.
+   * <p>Failures are logged and swallowed, after rolling back whatever was widened so far: the
+   * widening only matters to installs predating 2.0.0, and a database that refuses the ALTER (say,
+   * a read-only role) should not prevent an otherwise healthy application from starting.
    */
   public static void widenLockVersion(JdbcTemplate jdbcTemplate, Dialect dialect) {
     if (dialect != Dialect.POSTGRESQL) {
@@ -87,11 +87,39 @@ public final class LockVersionMigration {
     DataSource dataSource = jdbcTemplate.getDataSource();
     Assert.notNull(dataSource, "DataSource cannot be obtained during lock_version migration");
     try (Connection conn = dataSource.getConnection()) {
+      widenAllInOneTransaction(conn);
+    } catch (SQLException e) {
+      log.warn("Could not verify or widen the {} column; leaving the schema as-is.", COLUMN, e);
+    }
+  }
+
+  /**
+   * Widens every narrow target in one transaction owned here: all three columns or none. The
+   * explicit commit is what makes the ALTERs stick on a pool whose auto-commit default is off —
+   * PostgreSQL DDL is transactional, and such a pool rolls back whatever is still open when the
+   * connection goes back to it.
+   */
+  private static void widenAllInOneTransaction(Connection conn) throws SQLException {
+    boolean autoCommit = conn.getAutoCommit();
+    conn.setAutoCommit(false);
+    try {
       for (WideningTarget target : TARGETS) {
         widenIfNarrow(conn, target);
       }
+      conn.commit();
     } catch (SQLException e) {
-      log.warn("Could not verify or widen the {} column; leaving the schema as-is.", COLUMN, e);
+      try {
+        conn.rollback();
+      } catch (SQLException rollbackFailure) {
+        e.addSuppressed(rollbackFailure);
+      }
+      throw e;
+    } finally {
+      try {
+        conn.setAutoCommit(autoCommit);
+      } catch (SQLException e) {
+        log.warn("Ignoring exception while restoring auto-commit.", e);
+      }
     }
   }
 

@@ -2,8 +2,11 @@ package org.opentmf.db.lock.dialect;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -20,6 +23,7 @@ import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
+import org.mockito.InOrder;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 /**
@@ -90,6 +94,57 @@ class LockVersionMigrationTest {
     verify(statement)
         .execute("alter table DB_LOCK_LATEST alter column lock_version type VARCHAR(50)");
     verify(statement, times(3)).execute(anyString());
+    verify(conn).commit();
+  }
+
+  /**
+   * The widening owns its transaction: on a pool whose auto-commit default is off the pool would
+   * otherwise roll the ALTERs back when the connection is returned, and on one whose default is on
+   * that default must survive the call.
+   */
+  @Test
+  void widenLockVersion_commitsItsOwnTransaction_andRestoresAutoCommit() throws SQLException {
+    Connection conn = connectionWithColumnWidth(10, false);
+    when(conn.getAutoCommit()).thenReturn(true);
+    when(conn.createStatement()).thenReturn(mock(Statement.class));
+
+    LockVersionMigration.widenLockVersion(jdbcTemplateFor(conn), Dialect.POSTGRESQL);
+
+    InOrder order = inOrder(conn);
+    order.verify(conn).setAutoCommit(false);
+    order.verify(conn).commit();
+    order.verify(conn).setAutoCommit(true);
+  }
+
+  @Test
+  void widenLockVersion_whenAnAlterFails_rollsBackEveryWidening_andLetsStartupContinue()
+      throws SQLException {
+    Connection conn = connectionWithColumnWidth(10, false);
+    Statement statement = mock(Statement.class);
+    when(conn.createStatement()).thenReturn(statement);
+    when(statement.execute(anyString()))
+        .thenReturn(false)
+        .thenThrow(new SQLException("permission denied for table DB_LOCK_HISTORY"));
+
+    assertDoesNotThrow(
+        () -> LockVersionMigration.widenLockVersion(jdbcTemplateFor(conn), Dialect.POSTGRESQL));
+
+    verify(conn).rollback();
+    verify(conn, never()).commit();
+  }
+
+  @Test
+  void widenLockVersion_whenRollbackAndRestoreAlsoFail_stillLetsStartupContinue()
+      throws SQLException {
+    Connection conn = connectionWithColumnWidth(10, false);
+    Statement statement = mock(Statement.class);
+    when(conn.createStatement()).thenReturn(statement);
+    when(statement.execute(anyString())).thenThrow(new SQLException("connection lost"));
+    doThrow(new SQLException("connection lost")).when(conn).rollback();
+    doThrow(new SQLException("connection lost")).when(conn).setAutoCommit(anyBoolean());
+
+    assertDoesNotThrow(
+        () -> LockVersionMigration.widenLockVersion(jdbcTemplateFor(conn), Dialect.POSTGRESQL));
   }
 
   @Test

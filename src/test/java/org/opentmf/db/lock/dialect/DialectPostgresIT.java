@@ -1,10 +1,21 @@
 package org.opentmf.db.lock.dialect;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.zaxxer.hikari.HikariConfig;
+import com.zaxxer.hikari.HikariDataSource;
+import java.nio.charset.StandardCharsets;
+import java.sql.Connection;
+import java.sql.Statement;
+import java.util.List;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
 import org.opentmf.db.lock.util.JdbcHelper;
+import org.springframework.core.io.ByteArrayResource;
+import org.springframework.core.io.Resource;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -118,8 +129,98 @@ class DialectPostgresIT extends AbstractDialectIT {
   }
 
   /**
+   * A user-supplied {@code ddl-location} script has no COMMIT of its own. Under a pool whose
+   * auto-commit default is off, which rolls back whatever is still open when a connection goes back
+   * to it, its tables must still be there for a second connection.
+   */
+  @Test
+  void createTables_withADdlLocationScript_underAPoolWithAutoCommitOff_leavesTheTableBehind() {
+    String schema = freshSchema("ac_off_user");
+    try (HikariDataSource pool = pool(schema, false)) {
+      JdbcHelper.createTables(new JdbcTemplate(pool),
+          script("create table if not exists USER_DB_LOCK (id int primary key);"));
+    }
+
+    assertEquals(List.of("user_db_lock"), tablesIn(schema));
+  }
+
+  @Test
+  void lockVersionWidening_underAPoolWithAutoCommitOff_isCommitted() {
+    String schema = freshSchema("ac_off_widen");
+    JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource());
+    for (String table : List.of("db_lock", "db_lock_history", "db_lock_latest")) {
+      jdbcTemplate.execute(
+          "create table " + schema + "." + table + " (lock_version VARCHAR(" + LEGACY_LENGTH + "))");
+    }
+    try (HikariDataSource pool = pool(schema, false)) {
+      LockVersionMigration.widenLockVersion(new JdbcTemplate(pool), Dialect.POSTGRESQL);
+    }
+
+    assertLockVersionLength(jdbcTemplate, schema, "db_lock", WIDENED_LENGTH);
+    assertLockVersionLength(jdbcTemplate, schema, "db_lock_history", WIDENED_LENGTH);
+    assertLockVersionLength(jdbcTemplate, schema, "db_lock_latest", WIDENED_LENGTH);
+  }
+
+  /**
+   * A script that fails part-way must be undone as a whole, and the connection must go back to the
+   * pool clean: no transaction left open (let alone an aborted one, which would fail every
+   * statement of the next borrower) and the pool's own auto-commit setting restored.
+   */
+  @Test
+  void createTables_whenTheScriptFails_rollsItBackAndReturnsACleanConnection() throws Exception {
+    String schema = freshSchema("failing_script");
+    try (HikariDataSource pool = pool(schema, true)) {
+      JdbcTemplate jdbcTemplate = new JdbcTemplate(pool);
+      Resource failing = script("begin transaction;\n"
+          + "create table USER_DB_LOCK (id int primary key);\n"
+          + "select * from no_such_table;\n"
+          + "commit transaction;");
+
+      assertThrows(RuntimeException.class, () -> JdbcHelper.createTables(jdbcTemplate, failing));
+
+      assertEquals(List.of(), tablesIn(schema), "a failed script must leave nothing behind");
+      try (Connection conn = pool.getConnection(); Statement st = conn.createStatement()) {
+        assertTrue(conn.getAutoCommit(), "the pool's auto-commit setting must be restored");
+        assertDoesNotThrow(() -> st.execute("select 1"),
+            "the pooled connection must not be left inside an aborted transaction");
+      }
+    }
+  }
+
+  private String freshSchema(String schema) {
+    JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource());
+    jdbcTemplate.execute("drop schema if exists " + schema + " cascade");
+    jdbcTemplate.execute("create schema " + schema);
+    return schema;
+  }
+
+  /** A single-connection Hikari pool, so a test can borrow back the very connection used. */
+  private static HikariDataSource pool(String schema, boolean autoCommit) {
+    HikariConfig config = new HikariConfig();
+    config.setJdbcUrl(CONTAINER.getJdbcUrl());
+    config.setUsername(CONTAINER.getUsername());
+    config.setPassword(CONTAINER.getPassword());
+    config.setSchema(schema);
+    config.setAutoCommit(autoCommit);
+    config.setMaximumPoolSize(1);
+    return new HikariDataSource(config);
+  }
+
+  private static Resource script(String sql) {
+    return new ByteArrayResource(sql.getBytes(StandardCharsets.UTF_8));
+  }
+
+  private List<String> tablesIn(String schema) {
+    return new JdbcTemplate(dataSource()).queryForList(
+        "select table_name from information_schema.tables where table_schema = ? order by 1",
+        String.class, schema);
+  }
+
+  /**
    * Installs an event trigger recording every {@code ALTER TABLE} executed from here on, and
-   * clears anything recorded earlier.
+   * clears anything recorded earlier. The trigger is database-wide and outlives the test, so its
+   * function names the audit table with its schema: an ALTER issued under another
+   * {@code search_path} must still find it rather than fail.
    *
    * <p>This is what makes these tests real regression guards. Asserting only "the width is still
    * 50" would pass just as well against the old unguarded script — the ALTER itself is what has to
@@ -131,7 +232,7 @@ class DialectPostgresIT extends AbstractDialectIT {
     jdbcTemplate.execute("create table if not exists ddl_audit (tag text not null)");
     jdbcTemplate.execute(
         "create or replace function record_alter_table() returns event_trigger language plpgsql "
-            + "as $fn$ begin insert into ddl_audit(tag) values (tg_tag); end $fn$");
+            + "as $fn$ begin insert into public.ddl_audit(tag) values (tg_tag); end $fn$");
     jdbcTemplate.execute("drop event trigger if exists audit_alter_table");
     jdbcTemplate.execute(
         "create event trigger audit_alter_table on ddl_command_end "

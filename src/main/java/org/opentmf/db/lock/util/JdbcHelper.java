@@ -148,17 +148,53 @@ public final class JdbcHelper {
     Assert.notNull(dataSource, "DataSource cannot be obtained during DB_Lock service init");
     try (Connection conn = dataSource.getConnection()) {
       logMetaData(conn.getMetaData(), conn.getSchema());
+      executeInOwnTransaction(conn, new EncodedResource(ddlScript), separator);
+    } catch (SQLException e) {
+      throw new IllegalStateException("Unable to initialize the database.", e);
+    }
+  }
+
+  /**
+   * Runs the script as one transaction owned here, whatever auto-commit default the pool hands the
+   * connection out with.
+   *
+   * <p>Leaving the boundary to the pool is not safe. Where DDL is transactional (PostgreSQL, SQL
+   * Server, DB2), a pool whose auto-commit default is off rolls back the uncommitted DDL when the
+   * connection is returned, so the tables silently never appear. With auto-commit on, a script that
+   * opens its own transaction and then fails hands the pool a connection stuck in an aborted
+   * transaction, which pgjdbc will not even let the pool roll back. Committing here makes the script
+   * stick in the first case and keeps it atomic where the engine allows it; rolling back on any
+   * failure, the unchecked {@code ScriptException} included, returns the connection clean in the
+   * second.
+   */
+  private static void executeInOwnTransaction(
+      Connection conn, EncodedResource script, String separator) throws SQLException {
+    boolean autoCommit = conn.getAutoCommit();
+    conn.setAutoCommit(false);
+    try {
       ScriptUtils.executeSqlScript(
           conn,
-          new EncodedResource(ddlScript),
+          script,
           false,
           false,
           ScriptUtils.DEFAULT_COMMENT_PREFIX,
           separator,
           ScriptUtils.DEFAULT_BLOCK_COMMENT_START_DELIMITER,
           ScriptUtils.DEFAULT_BLOCK_COMMENT_END_DELIMITER);
+      conn.commit();
+    } catch (SQLException | RuntimeException e) {
+      rollback(conn);
+      throw e;
+    } finally {
+      restoreAutoCommit(conn, autoCommit);
+    }
+  }
+
+  private static void restoreAutoCommit(Connection conn, boolean autoCommit) {
+    try {
+      conn.setAutoCommit(autoCommit);
     } catch (SQLException e) {
-      throw new IllegalStateException("Unable to initialize the database.", e);
+      log.warn("Ignoring exception while restoring auto-commit.", e);
     }
   }
 

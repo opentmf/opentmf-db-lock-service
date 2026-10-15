@@ -3,17 +3,28 @@ package org.opentmf.db.lock.util;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
+import java.sql.DatabaseMetaData;
+import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Statement;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
+import org.mockito.InOrder;
+import org.springframework.core.io.ByteArrayResource;
+import org.springframework.core.io.Resource;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.init.ScriptStatementFailedException;
 
 /**
  * @author Gokhan Demir
@@ -84,6 +95,81 @@ class JdbcHelperTest {
     assertDoesNotThrow(() -> JdbcHelper.rollback(conn));
     assertDoesNotThrow(() -> JdbcHelper.rollback(null));
     verify(conn).rollback();
+  }
+
+  /**
+   * The DDL owns its transaction: on a pool whose auto-commit default is off the pool would
+   * otherwise roll the uncommitted DDL back when the connection is returned, and on one whose
+   * default is on that default must survive the call.
+   */
+  @Test
+  void createTables_commitsTheScriptAsItsOwnTransaction_andRestoresAutoCommit()
+      throws SQLException {
+    Connection conn = scriptConnection();
+    Statement statement = scriptStatement();
+    when(conn.createStatement()).thenReturn(statement);
+
+    JdbcHelper.createTables(jdbcTemplateReturning(conn), script("create table T (id int);"));
+
+    InOrder order = inOrder(conn);
+    order.verify(conn).setAutoCommit(false);
+    order.verify(conn).commit();
+    order.verify(conn).setAutoCommit(true);
+    verify(conn, never()).rollback();
+  }
+
+  @Test
+  void createTables_whenAStatementFails_rollsBackAndRestoresAutoCommitBeforePropagating()
+      throws SQLException {
+    Connection conn = scriptConnection();
+    Statement statement = scriptStatement();
+    when(conn.createStatement()).thenReturn(statement);
+    when(statement.execute(anyString())).thenThrow(new SQLException("relation does not exist"));
+    JdbcTemplate jdbcTemplate = jdbcTemplateReturning(conn);
+    Resource script = script("create table T (id int);");
+
+    assertThrows(ScriptStatementFailedException.class,
+        () -> JdbcHelper.createTables(jdbcTemplate, script));
+
+    InOrder order = inOrder(conn);
+    order.verify(conn).rollback();
+    order.verify(conn).setAutoCommit(true);
+    verify(conn, never()).commit();
+  }
+
+  @Test
+  void createTables_whenRestoringAutoCommitFails_keepsTheCommittedScript() throws SQLException {
+    Connection conn = scriptConnection();
+    Statement statement = scriptStatement();
+    when(conn.createStatement()).thenReturn(statement);
+    doThrow(new SQLException("connection lost")).when(conn).setAutoCommit(true);
+    JdbcTemplate jdbcTemplate = jdbcTemplateReturning(conn);
+    Resource script = script("create table T (id int);");
+
+    assertDoesNotThrow(() -> JdbcHelper.createTables(jdbcTemplate, script));
+
+    verify(conn).commit();
+  }
+
+  /** An auto-commit-on connection whose metadata answers the trace-level table listing. */
+  private static Connection scriptConnection() throws SQLException {
+    Connection conn = mock(Connection.class);
+    DatabaseMetaData metaData = mock(DatabaseMetaData.class);
+    when(metaData.getTables(any(), any(), anyString(), any())).thenReturn(mock(ResultSet.class));
+    when(conn.getMetaData()).thenReturn(metaData);
+    when(conn.getAutoCommit()).thenReturn(true);
+    return conn;
+  }
+
+  /** A statement reporting no further results, so ScriptUtils stops draining them. */
+  private static Statement scriptStatement() throws SQLException {
+    Statement statement = mock(Statement.class);
+    when(statement.getUpdateCount()).thenReturn(-1);
+    return statement;
+  }
+
+  private static Resource script(String sql) {
+    return new ByteArrayResource(sql.getBytes(StandardCharsets.UTF_8));
   }
 
   private static JdbcTemplate jdbcTemplateReturning(Connection conn) throws SQLException {

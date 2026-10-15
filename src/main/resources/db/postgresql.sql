@@ -1,4 +1,7 @@
-begin transaction;
+-- PostgreSQL creation script for opentmf-db-lock-service.
+-- No BEGIN / COMMIT here: the library runs every DDL script as one transaction of its
+-- own and commits it explicitly, so the tables persist whatever the pool's auto-commit
+-- default is, and a script that fails part-way is rolled back as a whole.
 
 /*==============================================================*/
 /* Table: DB_LOCK                                               */
@@ -136,5 +139,3 @@ comment on column DB_LOCK_LATEST.lock_acquired_on is
    this script: it reads the column width through JDBC metadata and issues
    the ALTER only when the column is genuinely narrower than 50. */
 /*==============================================================*/
-
-commit transaction;
