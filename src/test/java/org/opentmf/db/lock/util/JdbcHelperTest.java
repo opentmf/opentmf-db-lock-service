@@ -151,6 +151,54 @@ class JdbcHelperTest {
     verify(conn).commit();
   }
 
+  @Test
+  void inTransaction_whenPreparingTheConnectionFails_closesItAndPropagates() throws SQLException {
+    Connection conn = mock(Connection.class);
+    SQLException failure = new SQLException("connection went away");
+    when(conn.getAutoCommit()).thenThrow(failure);
+    JdbcTemplate jdbcTemplate = jdbcTemplateReturning(conn);
+
+    SQLException thrown = assertThrows(SQLException.class,
+        () -> JdbcHelper.inTransaction(jdbcTemplate, c -> "never runs"));
+
+    assertSame(failure, thrown);
+    verify(conn).close();
+    verify(conn, never()).commit();
+  }
+
+  @Test
+  void inTransaction_whenTheWorkThrowsAnything_rollsBackAndStillGivesTheConnectionBack()
+      throws SQLException {
+    Connection conn = scriptConnection();
+    JdbcTemplate jdbcTemplate = jdbcTemplateReturning(conn);
+
+    assertThrows(IllegalArgumentException.class, () -> JdbcHelper.inTransaction(jdbcTemplate,
+        c -> {
+          throw new IllegalArgumentException("Insert statement did not produce a generated key.");
+        }));
+
+    InOrder order = inOrder(conn);
+    order.verify(conn).rollback();
+    order.verify(conn).setAutoCommit(true);
+    order.verify(conn).close();
+    verify(conn, never()).commit();
+  }
+
+  @Test
+  void inTransaction_whenRestoringTheSettingsFails_stillClosesAndReturnsTheResult()
+      throws SQLException {
+    Connection conn = scriptConnection();
+    when(conn.getTransactionIsolation()).thenReturn(Connection.TRANSACTION_SERIALIZABLE);
+    doThrow(new SQLException("connection lost"))
+        .when(conn).setTransactionIsolation(Connection.TRANSACTION_SERIALIZABLE);
+    JdbcTemplate jdbcTemplate = jdbcTemplateReturning(conn);
+
+    assertSame("done", JdbcHelper.inTransaction(jdbcTemplate, c -> "done"));
+
+    verify(conn).commit();
+    verify(conn).close();
+  }
+
   /** An auto-commit-on connection whose metadata answers the trace-level table listing. */
   private static Connection scriptConnection() throws SQLException {
     Connection conn = mock(Connection.class);

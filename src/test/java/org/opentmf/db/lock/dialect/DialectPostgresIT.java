@@ -1,5 +1,6 @@
 package org.opentmf.db.lock.dialect;
 
+import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -10,9 +11,18 @@ import com.zaxxer.hikari.HikariDataSource;
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.Statement;
+import java.time.Duration;
 import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
+import org.opentmf.db.lock.config.DbLockProperties;
+import org.opentmf.db.lock.model.AcquiredLock;
+import org.opentmf.db.lock.model.LockType;
+import org.opentmf.db.lock.service.impl.DbLockServiceImpl;
 import org.opentmf.db.lock.util.JdbcHelper;
 import org.springframework.core.io.ByteArrayResource;
 import org.springframework.core.io.Resource;
@@ -187,6 +197,61 @@ class DialectPostgresIT extends AbstractDialectIT {
     }
   }
 
+  /** The shared waiter scenario on a pool configured for REPEATABLE READ, the protocol's worst case. */
+  @Test
+  void aWaiterSeesTheVersionRecordedByTheHolderItWaitedFor_underRepeatableRead()
+      throws Exception {
+    String schema = freshSchema("repeatable_read");
+    HikariConfig config = poolConfig(schema, false, 4);
+    config.setTransactionIsolation("TRANSACTION_REPEATABLE_READ");
+    try (HikariDataSource pool = new HikariDataSource(config)) {
+      assertAWaiterSeesTheVersionRecordedWhileItWaited(pool);
+    }
+  }
+
+  /**
+   * A waiter holds no connection, and so no transaction, while it sleeps between polls. Up to 2.2.2
+   * it kept its pooled connection for the whole wait — one per waiter, for up to the acquire
+   * timeout — and from 2.2.1 sat {@code idle in transaction} on it, holding locks on DB_LOCK that
+   * queue any DDL against the table and make an {@code idle_in_transaction_session_timeout} shorter
+   * than the poll interval kill the waiter.
+   */
+  @Test
+  void aWaiterHoldsNoConnectionWhileItSleepsBetweenPolls() throws Exception {
+    String schema = freshSchema("waiting");
+    try (HikariDataSource pool = pool(schema, false, 4)) {
+      JdbcTemplate jdbcTemplate = new JdbcTemplate(pool);
+      JdbcHelper.createTables(jdbcTemplate, Dialect.POSTGRESQL);
+      DbLockProperties props = new DbLockProperties();
+      props.setLockAcquirePollInterval(1500L);
+      props.setLockAcquireTimeout(10_000L);
+      DbLockServiceImpl holderPod = new DbLockServiceImpl(jdbcTemplate, props);
+      DbLockServiceImpl waiterPod = new DbLockServiceImpl(jdbcTemplate, props);
+      ExecutorService executor = Executors.newSingleThreadExecutor();
+      try {
+        AcquiredLock holder = holderPod.acquireLock(LockType.LOCK_X, "1");
+        Future<AcquiredLock> waiter =
+            executor.submit(() -> waiterPod.acquireLock(LockType.LOCK_X, "1"));
+        await().pollDelay(Duration.ofMillis(500)).until(() -> true);
+
+        int active = pool.getHikariPoolMXBean().getActiveConnections();
+        List<String> idleInTransaction = new JdbcTemplate(dataSource()).queryForList(
+            "select query from pg_stat_activity where state = 'idle in transaction'"
+                + " and query ilike '%db_lock%'",
+            String.class);
+        holderPod.releaseLock(holder, false);
+        waiterPod.releaseLock(waiter.get(10, TimeUnit.SECONDS), false);
+
+        assertEquals(0, active, "the sleeping waiter must not keep a pooled connection");
+        assertEquals(List.of(), idleInTransaction, "nobody may sit idle in transaction");
+      } finally {
+        executor.shutdownNow();
+        holderPod.destroy();
+        waiterPod.destroy();
+      }
+    }
+  }
+
   private String freshSchema(String schema) {
     JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource());
     jdbcTemplate.execute("drop schema if exists " + schema + " cascade");
@@ -196,14 +261,27 @@ class DialectPostgresIT extends AbstractDialectIT {
 
   /** A single-connection Hikari pool, so a test can borrow back the very connection used. */
   private static HikariDataSource pool(String schema, boolean autoCommit) {
+    return pool(schema, autoCommit, 1);
+  }
+
+  private static HikariDataSource pool(String schema, boolean autoCommit, int size) {
+    return new HikariDataSource(poolConfig(schema, autoCommit, size));
+  }
+
+  /**
+   * The schema goes into the URL rather than {@link HikariConfig#setSchema}: pgjdbc runs
+   * {@code setSchema} as a statement, which on an auto-commit-off pool opens a transaction of its
+   * own and would make every pooled connection look {@code idle in transaction}.
+   */
+  private static HikariConfig poolConfig(String schema, boolean autoCommit, int size) {
+    String url = CONTAINER.getJdbcUrl();
     HikariConfig config = new HikariConfig();
-    config.setJdbcUrl(CONTAINER.getJdbcUrl());
+    config.setJdbcUrl(url + (url.contains("?") ? "&" : "?") + "currentSchema=" + schema);
     config.setUsername(CONTAINER.getUsername());
     config.setPassword(CONTAINER.getPassword());
-    config.setSchema(schema);
     config.setAutoCommit(autoCommit);
-    config.setMaximumPoolSize(1);
-    return new HikariDataSource(config);
+    config.setMaximumPoolSize(size);
+    return config;
   }
 
   private static Resource script(String sql) {

@@ -89,94 +89,81 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
 
   @Override
   public AcquiredLock acquireLock(LockType lockType, String lockVersion) throws DbLockException {
-    Connection conn = null;
     log.debug("Attempting to acquire lock for lockType = {}, and lockVersion = {}",
         lockType, lockVersion);
+    long t0 = System.currentTimeMillis();
+    while (true) {
+      AcquiredLock acquiredLock = tryToLock(lockType, lockVersion);
+      if (acquiredLock != null) {
+        createLockReleaseTimer(acquiredLock);
+        log.debug("Acquired lock id = {} for lockType = {}, and lockVersion = {}.",
+            acquiredLock.getLockId(), lockType, lockVersion);
+        return acquiredLock;
+      }
+      if ((System.currentTimeMillis() - t0) > lockHelper.getLockAcquireTimeout(lockType)) {
+        String message = String.format("Cannot acquire DB Lock for %s within the configured " +
+            "%d millis. Giving up.", lockType, lockHelper.getLockAcquireTimeout(lockType));
+        throw new DbLockTimeoutException(message);
+      }
+      if (!reclaimStaleLock(lockType)) {
+        log.debug("Sleeping {} milliseconds before re-attempting to acquire {} lock.",
+            lockHelper.getLockAcquirePollInterval(lockType), lockType);
+        sleepUntilNextPoll(lockType);
+      }
+    }
+  }
+
+  /**
+   * One attempt at the lock, as its own short transaction: the inserted lock together with the
+   * latest version recorded so far, or {@code null} when the unique index on {@code lock_type}
+   * rejected the insert because another instance holds the lock. The connection goes back to the
+   * pool before the caller sleeps, so a waiter holds neither a connection nor a transaction — and
+   * so no snapshot — between attempts.
+   */
+  private AcquiredLock tryToLock(LockType lockType, String lockVersion) throws DbLockException {
     try {
-      conn = JdbcHelper.getConnection(jdbcTemplate);
-      int lockId = lock(conn, lockType, lockVersion);
-      AcquiredLock acquiredLock = getLockDetails(conn, lockId, lockType, lockVersion);
-      JdbcHelper.commit(conn);
-      createLockReleaseTimer(acquiredLock);
-      log.debug("Acquired lock id = {} for lockType = {}, and lockVersion = {}.",
-          lockId, lockType, lockVersion);
-      return acquiredLock;
+      return JdbcHelper.inTransaction(jdbcTemplate, conn -> {
+        int lockId = JdbcHelper.autoIncrementInsert(conn, SQL_INSERT_LOCK,
+            lockType.getDbValue(), lockVersion, getHostName());
+        return getLockDetails(conn, lockId, lockType, lockVersion);
+      });
     } catch (SQLException e) {
-      JdbcHelper.rollback(conn);
-      throw new DbLockException("Failed to acquire lock for " + lockType, e);
-    } finally {
-      JdbcHelper.close(conn);
+      String sqlState = e.getSQLState();
+      if (sqlState != null && sqlState.startsWith("23")) {
+        log.debug("Lock {} is held by another instance (sqlState={}). Retrying...",
+            lockType, sqlState);
+        return null;
+      }
+      throw new DbLockException("Database error while acquiring lock for " + lockType, e);
     }
   }
 
   @Override
   public void releaseLock(AcquiredLock lock, boolean updateLatestLock) throws DbLockException {
-    Connection conn = null;
     try {
-      conn = JdbcHelper.getConnection(jdbcTemplate);
-      if (updateLatestLock) {
-        handleLatestLock(conn, lock.getLockId(), lock.getLockType());
-      }
-      insertHistoryRecord(conn, lock.getLockId());
-      deleteLockRecordIfExists(conn, lock);
-      JdbcHelper.commit(conn);
-      cancelAndRemoveLockReleaseTimer(lock);
+      JdbcHelper.inTransaction(jdbcTemplate, conn -> {
+        if (updateLatestLock) {
+          handleLatestLock(conn, lock.getLockId(), lock.getLockType());
+        }
+        insertHistoryRecord(conn, lock.getLockId());
+        deleteLockRecordIfExists(conn, lock);
+        return null;
+      });
     } catch (SQLException e) {
-      JdbcHelper.rollback(conn);
       log.warn("Failed to release lock id={}, type={}", lock.getLockId(), lock.getLockType(), e);
       throw new DbLockException("Couldn't release lock", e);
-    } finally {
-      JdbcHelper.close(conn);
     }
+    cancelAndRemoveLockReleaseTimer(lock);
   }
 
   @Override
   public boolean hasLock(LockType lockType) {
-    Connection conn = null;
     try {
-      conn = JdbcHelper.getConnection(jdbcTemplate);
-      var cnt = JdbcHelper.count(conn, SQL_LOCK_COUNT, lockType.getDbValue());
-      return cnt > 0;
+      return JdbcHelper.inTransaction(jdbcTemplate,
+          conn -> JdbcHelper.count(conn, SQL_LOCK_COUNT, lockType.getDbValue()) > 0);
     } catch (SQLException e) {
       log.warn("Ignoring SQLException on hasLock()", e);
-    } finally {
-      JdbcHelper.rollback(conn);
-      JdbcHelper.close(conn);
-    }
-    return false;
-  }
-
-  private int lock(Connection conn, LockType lockType, String lockVersion)
-      throws DbLockException {
-    long t0 = System.currentTimeMillis();
-    while (true) {
-      try {
-        return JdbcHelper.autoIncrementInsert(conn, SQL_INSERT_LOCK,
-            lockType.getDbValue(), lockVersion, getHostName());
-      } catch (SQLException e) {
-        String sqlState = e.getSQLState();
-        boolean isConstraintViolation = sqlState != null && sqlState.startsWith("23");
-        if (!isConstraintViolation) {
-          throw new DbLockException("Database error while acquiring lock for " + lockType, e);
-        }
-        JdbcHelper.rollback(conn);
-        log.debug("Lock {} is held by another instance (sqlState={}). Retrying...",
-            lockType, sqlState);
-        if ((System.currentTimeMillis() - t0) > lockHelper.getLockAcquireTimeout(lockType)) {
-          String message = String.format("Cannot acquire DB Lock for %s within the configured " +
-              "%d millis. Giving up.", lockType, lockHelper.getLockAcquireTimeout(lockType));
-          throw new DbLockTimeoutException(message);
-        }
-        if (reclaimStaleLock(conn, lockType)) {
-          // The existing lock had exceeded its hold-timeout and was reclaimed (almost certainly
-          // left behind by a crashed or hung holder). Retry the insert immediately instead of
-          // waiting for the next poll.
-          continue;
-        }
-        log.debug("Sleeping {} milliseconds before re-attempting to acquire {} lock.",
-            lockHelper.getLockAcquirePollInterval(lockType), lockType);
-        sleepUntilNextPoll(lockType);
-      }
+      return false;
     }
   }
 
@@ -201,36 +188,41 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
    * lock with a fresh one between our read and our delete, the delete matches zero rows and the new
    * holder is left untouched.
    *
+   * <p>It runs as its own short transaction, ended before the caller sleeps — including when there
+   * is nothing to reclaim, the common case for a waiter.
+   *
    * @return {@code true} if a stale lock row was reclaimed; {@code false} if there was no lock, it
    *     was not yet stale, another instance reclaimed it first, or the attempt failed.
    */
-  private boolean reclaimStaleLock(Connection conn, LockType lockType) {
+  private boolean reclaimStaleLock(LockType lockType) {
     try {
-      ExistingLock existing = fetchExistingLock(conn, lockType);
-      if (existing == null) {
-        return false;
-      }
-      long holdTimeout = lockHelper.getLockHoldTimeout(lockType);
-      OffsetDateTime expiresAt = existing.createdOn().plus(holdTimeout, ChronoUnit.MILLIS);
-      if (!expiresAt.isBefore(OffsetDateTime.now())) {
-        return false;
-      }
-      long staleSecs = ChronoUnit.SECONDS.between(expiresAt, OffsetDateTime.now());
-      log.warn("Reclaiming stale lock before acquiring {}: id={}, version={}, hostname={}, "
-              + "created_on={} (expired {}s ago, holdTimeout={}ms)",
-          lockType, existing.id(), existing.lockVersion(), existing.hostname(),
-          existing.createdOn(), staleSecs, holdTimeout);
-      JdbcHelper.executeUpdate(conn, SQL_INSERT_HISTORY, existing.id());
-      int deleted = JdbcHelper.executeUpdate(conn, SQL_DELETE_LOCK, existing.id(),
-          lockType.getDbValue());
-      JdbcHelper.commit(conn);
-      return deleted > 0;
+      return JdbcHelper.inTransaction(jdbcTemplate, conn -> reclaimIfStale(conn, lockType));
     } catch (SQLException e) {
-      JdbcHelper.rollback(conn);
       log.warn("Failed to reclaim stale lock for {}; will retry acquisition normally.",
           lockType, e);
       return false;
     }
+  }
+
+  private boolean reclaimIfStale(Connection conn, LockType lockType) throws SQLException {
+    ExistingLock existing = fetchExistingLock(conn, lockType);
+    if (existing == null) {
+      return false;
+    }
+    long holdTimeout = lockHelper.getLockHoldTimeout(lockType);
+    OffsetDateTime expiresAt = existing.createdOn().plus(holdTimeout, ChronoUnit.MILLIS);
+    if (!expiresAt.isBefore(OffsetDateTime.now())) {
+      return false;
+    }
+    long staleSecs = ChronoUnit.SECONDS.between(expiresAt, OffsetDateTime.now());
+    log.warn("Reclaiming stale lock before acquiring {}: id={}, version={}, hostname={}, "
+            + "created_on={} (expired {}s ago, holdTimeout={}ms)",
+        lockType, existing.id(), existing.lockVersion(), existing.hostname(),
+        existing.createdOn(), staleSecs, holdTimeout);
+    JdbcHelper.executeUpdate(conn, SQL_INSERT_HISTORY, existing.id());
+    int deleted = JdbcHelper.executeUpdate(conn, SQL_DELETE_LOCK, existing.id(),
+        lockType.getDbValue());
+    return deleted > 0;
   }
 
   private ExistingLock fetchExistingLock(Connection conn, LockType lockType) throws SQLException {
@@ -361,42 +353,43 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
    * configured lock-hold-timeout for its type. Intended to be called once at startup.
    */
   public void removeStaleLocks() {
-    Connection conn = null;
     try {
-      conn = JdbcHelper.getConnection(jdbcTemplate);
-      try (PreparedStatement ps = conn.prepareStatement(SQL_SELECT_ALL_LOCKS);
-           ResultSet rs = ps.executeQuery()) {
-        while (rs.next()) {
-          int lockId = rs.getInt("id");
-          String lockTypeValue = rs.getString("lock_type").trim();
-          String lockVersion = rs.getString("lock_version");
-          String hostname = rs.getString("hostname");
-          OffsetDateTime createdOn = rs.getObject("created_on", OffsetDateTime.class);
+      JdbcHelper.inTransaction(jdbcTemplate, conn -> {
+        removeStaleLocks(conn);
+        return null;
+      });
+    } catch (SQLException e) {
+      log.warn("Failed to clean up stale locks on startup", e);
+    }
+  }
 
-          LockType lockType = LockType.fromDbValue(lockTypeValue);
-          if (lockType == null) {
-            log.warn("Skipping lock id={} with unknown lock_type '{}'", lockId, lockTypeValue);
-            continue;
-          }
+  private void removeStaleLocks(Connection conn) throws SQLException {
+    try (PreparedStatement ps = conn.prepareStatement(SQL_SELECT_ALL_LOCKS);
+         ResultSet rs = ps.executeQuery()) {
+      while (rs.next()) {
+        int lockId = rs.getInt("id");
+        String lockTypeValue = rs.getString("lock_type").trim();
+        String lockVersion = rs.getString("lock_version");
+        String hostname = rs.getString("hostname");
+        OffsetDateTime createdOn = rs.getObject("created_on", OffsetDateTime.class);
 
-          long holdTimeout = lockHelper.getLockHoldTimeout(lockType);
-          OffsetDateTime expiresAt = createdOn.plus(holdTimeout, ChronoUnit.MILLIS);
-          if (expiresAt.isBefore(OffsetDateTime.now())) {
-            long staleSecs = ChronoUnit.SECONDS.between(expiresAt, OffsetDateTime.now());
-            log.warn("Removing stale lock: id={}, type={}, version={}, hostname={}, "
-                    + "created_on={} (expired {}s ago, holdTimeout={}ms)",
-                lockId, lockType, lockVersion, hostname, createdOn, staleSecs, holdTimeout);
-            JdbcHelper.executeUpdate(conn, SQL_INSERT_HISTORY, lockId);
-            JdbcHelper.executeUpdate(conn, SQL_DELETE_LOCK, lockId, lockTypeValue);
-          }
+        LockType lockType = LockType.fromDbValue(lockTypeValue);
+        if (lockType == null) {
+          log.warn("Skipping lock id={} with unknown lock_type '{}'", lockId, lockTypeValue);
+          continue;
+        }
+
+        long holdTimeout = lockHelper.getLockHoldTimeout(lockType);
+        OffsetDateTime expiresAt = createdOn.plus(holdTimeout, ChronoUnit.MILLIS);
+        if (expiresAt.isBefore(OffsetDateTime.now())) {
+          long staleSecs = ChronoUnit.SECONDS.between(expiresAt, OffsetDateTime.now());
+          log.warn("Removing stale lock: id={}, type={}, version={}, hostname={}, "
+                  + "created_on={} (expired {}s ago, holdTimeout={}ms)",
+              lockId, lockType, lockVersion, hostname, createdOn, staleSecs, holdTimeout);
+          JdbcHelper.executeUpdate(conn, SQL_INSERT_HISTORY, lockId);
+          JdbcHelper.executeUpdate(conn, SQL_DELETE_LOCK, lockId, lockTypeValue);
         }
       }
-      JdbcHelper.commit(conn);
-    } catch (SQLException e) {
-      JdbcHelper.rollback(conn);
-      log.warn("Failed to clean up stale locks on startup", e);
-    } finally {
-      JdbcHelper.close(conn);
     }
   }
 

@@ -1,5 +1,6 @@
 package org.opentmf.db.lock.dialect;
 
+import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -8,7 +9,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
+import java.time.Duration;
 import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
 import org.opentmf.db.lock.config.DbLockProperties;
@@ -120,6 +126,51 @@ abstract class AbstractDialectIT {
       service.destroy();
       jdbcTemplate.update("delete from DB_LOCK_LATEST where lock_type = 'Y'");
       jdbcTemplate.update("delete from DB_LOCK_HISTORY where lock_type = 'Y'");
+    }
+  }
+
+  @Test
+  void aWaiterSeesTheVersionRecordedByTheHolderItWaitedFor() throws Exception {
+    assertAWaiterSeesTheVersionRecordedWhileItWaited(dataSource());
+  }
+
+  /**
+   * Two instances of a new version start together: one takes the lock and records the version, the
+   * other waits for it. When the waiter's insert finally wins it must see that version as recorded,
+   * or it runs the same work a second time. Up to 2.2.2 the waiter inserted inside the transaction
+   * its last poll had left open across the sleep, so under a snapshot isolation level — MySQL's
+   * default REPEATABLE READ — it read {@code DB_LOCK_LATEST} as it was before the holder's release.
+   */
+  protected void assertAWaiterSeesTheVersionRecordedWhileItWaited(DataSource dataSource)
+      throws Exception {
+    JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource);
+    JdbcHelper.createTables(jdbcTemplate, dialect());
+    DbLockProperties props = testProperties();
+    props.setLockAcquirePollInterval(1500L);
+    props.setLockAcquireTimeout(10_000L);
+    DbLockServiceImpl holderPod = new DbLockServiceImpl(jdbcTemplate, props);
+    DbLockServiceImpl waiterPod = new DbLockServiceImpl(jdbcTemplate, props);
+    ExecutorService executor = Executors.newSingleThreadExecutor();
+    try {
+      holderPod.releaseLock(holderPod.acquireLock(LockType.LOCK_Z, "1.0"), true);
+      AcquiredLock holder = holderPod.acquireLock(LockType.LOCK_Z, "2.0");
+      Future<AcquiredLock> waiter =
+          executor.submit(() -> waiterPod.acquireLock(LockType.LOCK_Z, "2.0"));
+      // The waiter loses its first insert at once and sleeps until its next poll; the holder
+      // records 2.0 and releases during that sleep.
+      await().pollDelay(Duration.ofMillis(500)).until(() -> true);
+      holderPod.releaseLock(holder, true);
+
+      AcquiredLock acquired = waiter.get(10, TimeUnit.SECONDS);
+      waiterPod.releaseLock(acquired, false);
+      assertTrue(acquired.isSameVersion(),
+          () -> "2.0 was recorded while the waiter slept, yet it saw " + acquired.getPreviousLock());
+    } finally {
+      executor.shutdownNow();
+      holderPod.destroy();
+      waiterPod.destroy();
+      jdbcTemplate.update("delete from DB_LOCK_LATEST where lock_type = 'Z'");
+      jdbcTemplate.update("delete from DB_LOCK_HISTORY where lock_type = 'Z'");
     }
   }
 

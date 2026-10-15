@@ -233,8 +233,85 @@ public final class JdbcHelper {
   }
 
   /**
+   * One unit of work against a connection, run by {@link #inTransaction(JdbcTemplate, SqlWork)}.
+   *
+   * @param <T> the result type
+   */
+  @FunctionalInterface
+  public interface SqlWork<T> {
+
+    T run(Connection conn) throws SQLException;
+  }
+
+  /**
+   * Runs {@code work} as one short transaction on a connection borrowed for it alone, and gives
+   * the connection back before returning. Every step of the lock protocol runs in such a unit:
+   *
+   * <ul>
+   *   <li>Auto-commit off and READ COMMITTED for the duration. The protocol reads the latest lock
+   *       record right after its insert wins; under a snapshot taken any earlier (REPEATABLE READ,
+   *       MySQL's default) that read can miss the version the previous holder just recorded.
+   *   <li>Committed when {@code work} returns, rolled back when it throws anything at all, so no
+   *       path leaves an open transaction for the pool to decide about.
+   *   <li>The connection's own auto-commit and isolation restored before it goes back, so a pool
+   *       that does not reset them on return still hands the next borrower what it handed out.
+   * </ul>
+   *
+   * <p>No connection is held between units: a caller waiting for a lock borrows one per attempt.
+   */
+  public static <T> T inTransaction(JdbcTemplate jdbcTemplate, SqlWork<T> work)
+      throws SQLException {
+    DataSource dataSource = Objects.requireNonNull(jdbcTemplate.getDataSource());
+    Connection conn = dataSource.getConnection();
+    boolean autoCommit;
+    int isolation;
+    try {
+      autoCommit = conn.getAutoCommit();
+      isolation = conn.getTransactionIsolation();
+      // Isolation first: with auto-commit still on no transaction can be open yet, and pgjdbc
+      // refuses to change the level inside one.
+      if (isolation != Connection.TRANSACTION_READ_COMMITTED) {
+        conn.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+      }
+      if (autoCommit) {
+        conn.setAutoCommit(false);
+      }
+    } catch (SQLException | RuntimeException e) {
+      close(conn);
+      throw e;
+    }
+    boolean committed = false;
+    try {
+      T result = work.run(conn);
+      conn.commit();
+      committed = true;
+      return result;
+    } finally {
+      if (!committed) {
+        rollback(conn);
+      }
+      restoreSettings(conn, autoCommit, isolation);
+      close(conn);
+    }
+  }
+
+  private static void restoreSettings(Connection conn, boolean autoCommit, int isolation) {
+    try {
+      if (isolation != Connection.TRANSACTION_READ_COMMITTED) {
+        conn.setTransactionIsolation(isolation);
+      }
+      if (autoCommit) {
+        conn.setAutoCommit(true);
+      }
+    } catch (SQLException e) {
+      log.warn("Ignoring exception while restoring the connection's own settings.", e);
+    }
+  }
+
+  /**
    * Returns an open connection with auto-commit disabled. Ownership passes to the caller, which
-   * must close it — every call site does so in a {@code finally} via {@link #close(Connection)}.
+   * must close it via {@link #close(Connection)} in a {@code finally}. The lock protocol itself
+   * runs through {@link #inTransaction(JdbcTemplate, SqlWork)} instead.
    *
    * <p>The {@code setAutoCommit} call is guarded because it happens after the connection has been
    * handed over by the pool but before the caller can see it: if it throws, the caller never
