@@ -4,6 +4,128 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.2.3] - 2026-10-15
+
+A review of the library's transaction handling. Nothing here changes how a
+lock is taken — a single `INSERT` guarded by the unique index on `lock_type`
+— but the transactions around it now end explicitly on every path, and the
+decisions the lock makes no longer depend on the pool's defaults, the
+isolation level or the JVM's clock.
+
+### Fixed
+- **The lock tables and the `lock_version` widening persist under a pool
+  whose auto-commit default is off** (Hikari `auto-commit: false`). The DDL
+  ran on a raw pool connection and was never committed; such a pool rolls
+  back whatever is open when the connection is returned, and where DDL is
+  transactional that undid it. On SQL Server and DB2 the bundled tables were
+  never created — startup carried on and the first `acquireLock` failed — and
+  on PostgreSQL, SQL Server and DB2 a `ddl-location` script without its own
+  `COMMIT` was lost (both since 2.2.0). On PostgreSQL the pre-2.0.0
+  `VARCHAR(10)` → `VARCHAR(50)` widening was rolled back on every start while
+  logging that it had run (2.2.2 only; 2.2.0 and 2.2.1 ran it inside the
+  script's own transaction). MySQL/MariaDB, Oracle and H2 commit DDL
+  implicitly and were never affected, nor was the bundled PostgreSQL script.
+  The DDL and the widening now each run as one transaction the library owns:
+  committed explicitly, rolled back as a whole on any failure, the
+  connection's auto-commit restored.
+- **Instances starting together against an empty schema all start.**
+  `CREATE TABLE IF NOT EXISTS` is not safe against a concurrent creator on
+  PostgreSQL: once the first instance committed its tables, the others failed
+  with a duplicate key in `pg_class` and their startup failed (two out of
+  three, every time, measured). A failed DDL run is now rolled back and run
+  once more, which finds the tables. Present in every release.
+- **Every recorded release after the first updates `DB_LOCK_LATEST` on every
+  dialect.** The update used PostgreSQL-only `UPDATE … FROM`, so on
+  MySQL/MariaDB, Oracle, SQL Server, DB2 and H2 the second recorded release of
+  a lock type failed: it rolled back, the lock stayed held until its
+  hold-timeout, and the latest version froze at the first one recorded. Under
+  `@UsingClusterLock` every later version's work re-ran on each start and
+  reported a failure. Since 2.2.0.
+- **A waiter decides on the version the previous holder recorded** (2.2.1,
+  2.2.2). When `acquireLock` found nothing to reclaim it left the transaction
+  of that check open across the poll sleep, and its next insert and its read
+  of `DB_LOCK_LATEST` ran inside it. Under a snapshot isolation level —
+  MySQL/MariaDB's default REPEATABLE READ, or a pool configured for it — a
+  waiter that won the lock after the holder recorded its version read the
+  version from before, took it for an upgrade and ran the same work a second
+  time. On PostgreSQL the waiter also sat `idle in transaction` for every poll
+  interval holding locks on `DB_LOCK`, queueing any DDL against the table, and
+  an `idle_in_transaction_session_timeout` shorter than the poll interval
+  killed it instead of letting it wait.
+- **A lock's age is measured with the database's clock.** The stale-lock
+  reclaim (since 2.2.1) and the startup sweep compared `created_on`, stamped by
+  the database, with the JVM's clock. With a plain `TIMESTAMP` column
+  (MySQL/MariaDB, DB2, since 2.2.0) read in a time zone other than the
+  server's, a lock one second old looked hours old and another instance took it
+  from its live holder — measured: 38 ms after it was acquired. Clock skew
+  between hosts shifted the decision the same way on every database.
+- **DB2: timestamps are read back at all.** DB2's JCC driver refuses to read a
+  plain `TIMESTAMP` as `OffsetDateTime`, which every read of a lock's or the
+  latest version's time did. So on DB2, once a version had been recorded for a
+  lock type, every later `acquireLock` of that type failed with "Database error
+  while acquiring lock"; a stale lock was never reclaimed; and the startup sweep
+  failed whenever a lock row existed. Since 2.2.0 — the dialect ITs never read
+  a timestamp back. Such a column is now read as a `LocalDateTime` in the JVM's
+  time zone (`JdbcHelper.getOffsetDateTime`). That is only the true instant
+  when the JVM and the DB2 server run in the same time zone — which is what the
+  README already asks for DB2's plain `TIMESTAMP`; otherwise the timestamps you
+  read back are shifted. The lock's own decisions do not depend on it: they
+  compare two values of the same row, both read this way.
+- **The `downgradeAllowedAfter` period is measured with the database's clock**
+  for the same reason: the latest-version record is stamped by the database,
+  and on MySQL/MariaDB or DB2 under a time-zone mismatch (since 2.2.0) a
+  version recorded seconds ago could already allow a downgrade, or one
+  recorded long ago not yet.
+- **An interrupted waiter gives up.** The poll sleep swallowed the interrupt
+  and re-set the flag, so every later sleep returned at once and the loop
+  issued failed inserts at full speed until the acquire timeout — 6,396 in a
+  3-second window, measured, against 4 normally. It now ends with a
+  `DbLockException` and keeps the interrupt flag. Present in every release.
+- **No transaction is left for the pool to finish.** A database error other
+  than the unique-index violation during acquisition escaped past the rollback
+  (since 2.0.0), so the connection was closed mid-transaction and the pool
+  decided what happened to it: Hikari and DBCP2 roll it back, Tomcat JDBC by
+  default does not, and a raw Oracle connection commits on close. Every step now rolls back on any failure, unchecked
+  exceptions included.
+- **Racing releasers leave one history row.** Release, reclaim and the startup
+  sweep copy the lock row into `DB_LOCK_HISTORY` before deleting it; when the
+  hold-timeout fired just as the holder released, or two waiters reclaimed the
+  same stale lock (since 2.2.1), both copied it. The one whose delete finds the
+  row gone now rolls its copy back.
+- **A lock taken after shutdown is given back.** After `destroy()` no
+  hold-timeout can be armed, so such a lock could only ever be freed by
+  another instance's stale reclaim; the acquire now fails and releases it.
+
+### Changed
+- **One short transaction per step.** Each attempt at a lock, each reclaim,
+  each release, `hasLock` and each row of the startup sweep runs in its own
+  transaction on a connection borrowed for it alone, at READ COMMITTED, and
+  given back with its own auto-commit and isolation restored (a pool that does
+  not reset them on return no longer leaks auto-commit off to the
+  application). A thread waiting for a lock no longer holds a pooled
+  connection for the whole wait; it borrows one per attempt.
+- **Hold-timeouts run on one daemon thread per service instance** instead of a
+  non-daemon `java.util.Timer` thread per held lock. A hold-timeout whose
+  release fails is no longer kept, with its thread, for `destroy()` to retry.
+- A recorded release that finds its lock already gone now warns that the work
+  done under it was not recorded in `DB_LOCK_LATEST`, naming the hold-timeout.
+- `db/postgresql.sql` no longer carries its own `BEGIN` / `COMMIT`.
+- **Spring Boot BOM 4.1.0 → 4.1.1**, so consumers inheriting versions from
+  this library see its patch-level upgrades. ArchUnit 1.5.1 and the current
+  compiler, surefire, failsafe, deploy, Sonar and Central-publishing plugins
+  on the build side.
+- README: what `lock-hold-timeout` means — it is both the holder's kill-switch
+  and everyone else's staleness threshold, so work that outruns it loses the
+  lock while still running; and why `@UsingClusterLock` must not run inside a
+  caller's transaction.
+
+### Added
+- `JdbcHelper.inTransaction(JdbcTemplate, SqlWork)` and `JdbcHelper.SqlWork`.
+- `Dialect.getCurrentTimestampSql()` and `DialectDetector.fromConnection(Connection)`.
+- `LatestLock.getReadAt()` and a three-argument constructor; the two-argument
+  one is kept.
+- `JdbcHelper.getOffsetDateTime(ResultSet, String)`.
+
 ## [2.2.2] - 2026-08-10
 
 ### Fixed

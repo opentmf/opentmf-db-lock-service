@@ -10,6 +10,8 @@ The acquired locks are scheduled to be released automatically after a certain ti
 ## Created Database Tables
 This library creates 3 database tables and interacts with them using pure JDBC and manual transaction processing. Spring's JdbcTemplate is just used to obtain the database connections from the underlying DataSource.
 
+Every step — creating the tables, one attempt at a lock, one stale-lock reclaim, one release — runs as its own short transaction on a connection borrowed for that step alone, committed or rolled back explicitly, and given back with its own auto-commit and isolation settings restored. The library therefore works the same whether the pool hands connections out with auto-commit on or off (Hikari `auto-commit: false` included), and it runs its own transactions at READ COMMITTED whatever the pool's isolation level is. A thread waiting for a lock holds no connection between attempts.
+
 | Table Name      | Description                                                |
 |-----------------|------------------------------------------------------------|
 | DB_LOCK         | Keeps the current locks per lock_type                      |
@@ -50,7 +52,7 @@ Property-by-property:
 | `ddl-location`               | Spring Resource   | *unset*   | Classpath or filesystem path to your own DDL (`classpath:db/my.sql`, `file:/opt/ddl/my.sql`).        |
 | `lock-acquire-poll-interval` | `long` (ms)       | `1000`    | Minimum 100 ms.                                                                                      |
 | `lock-acquire-timeout`       | `long` (ms)       | `120 000` | Minimum 1 000 ms. Raises `DbLockTimeoutException` on expiry.                                         |
-| `lock-hold-timeout`          | `long` (ms)       | `300 000` | Minimum 2 000 ms. Background timer releases the lock when exceeded.                                  |
+| `lock-hold-timeout`          | `long` (ms)       | `300 000` | Minimum 2 000 ms. Releases the lock when exceeded — see **What `lock-hold-timeout` means** below.    |
 | `duration-overrides`         | `Map<LockType, …>`| empty     | Each entry overrides the three timeouts above for a single `LockType`. Unset entries inherit.        |
 
 Valid values for `dialect`: `postgresql`, `mysql`, `oracle`, `sqlserver`, `db2`, `h2`.
@@ -76,6 +78,15 @@ opentmf:
         lock-hold-timeout: 4000
 ```
 
+### What `lock-hold-timeout` means
+
+The hold-timeout does two jobs at once:
+
+1. **The holder's own kill-switch.** When a lock is still held this long after it was acquired, the instance holding it releases it in the background (one daemon thread per service instance runs these).
+2. **The staleness threshold for everybody else.** A lock older than the hold-timeout is treated as left behind by a crashed or hung holder: a waiting instance reclaims it on the spot, and the startup sweep removes it. A lock's age is measured with the database's own clock (since 2.2.3).
+
+So it is not a soft limit. Work that runs longer than the hold-timeout **loses the lock while it is still running**, and another instance may then take the lock and start the same work concurrently. When the original holder finally finishes and releases, its lock is already gone: nothing is recorded in `DB_LOCK_LATEST` for that run, and a warning says so. Set the hold-timeout (per lock type if needed) comfortably above the longest legitimate run of the work it guards.
+
 ## Supported Databases
 
 Starting with version 2.2.0, the library ships creation scripts for the following dialects and auto-detects the active one from `DatabaseMetaData.getDatabaseProductName()`:
@@ -97,8 +108,8 @@ Resolution order when `create-tables: true` (first match wins):
 3. Auto-detection via JDBC metadata.
 
 Notes:
-- **MySQL timestamp semantics.** MySQL has no `TIMESTAMP WITH TIME ZONE`. The shipped DDL uses plain `TIMESTAMP`, which MySQL stores as UTC internally and converts to the session time zone on read. Run both the application JVM and the MySQL server with `time_zone = UTC` to avoid drift.
-- **DB2 LUW timestamp semantics.** DB2 LUW has no `TIMESTAMP WITH TIME ZONE` either (that form is DB2 for z/OS only). The shipped DDL uses plain `TIMESTAMP`; same UTC guidance as MySQL.
+- **MySQL timestamp semantics.** MySQL has no `TIMESTAMP WITH TIME ZONE`. The shipped DDL uses plain `TIMESTAMP`, which MySQL stores as UTC internally and converts to the session time zone on read. Run both the application JVM and the MySQL server with `time_zone = UTC` to avoid drift in the timestamps you read back. Since 2.2.3 the lock's own decisions — how old a held lock is, how long ago a version was recorded — are measured with the database's clock, so a time-zone mismatch no longer makes a live lock look stale; up to 2.2.2 it did, and another instance took the lock from its live holder.
+- **DB2 LUW timestamp semantics.** DB2 LUW has no `TIMESTAMP WITH TIME ZONE` either (that form is DB2 for z/OS only). The shipped DDL uses plain `TIMESTAMP`; same UTC guidance, and the same 2.2.3 change, as for MySQL.
 - **Oracle / DB2 DDL files** use `/` as their statement separator (not `;`) because their scripts contain PL/SQL / compound-SQL blocks with embedded semicolons. This is handled internally by the library — it's only relevant if you edit those files.
 - **CockroachDB, Aurora-PostgreSQL, Yugabyte** identify themselves as PostgreSQL; auto-detection picks `POSTGRESQL` and the PG DDL runs. The library's DDL uses no PostgreSQL-specific features these forks don't support.
 
@@ -358,6 +369,12 @@ public class SomeServiceImpl implements SomeService {
   }
 }
 ```
+
+### `@UsingClusterLock` and transactions
+
+The aspect acquires and releases the lock on connections of its own, in transactions of its own; it never joins a Spring-managed transaction. The release — including the `DB_LOCK_LATEST` update that records the requested version as done — is committed the moment the annotated method returns.
+
+So do not run the annotated method inside a transaction: neither call it from code that already has one open, nor put `@Transactional` on the method itself (the aspect declares no `@Order`, so its position relative to the transaction advice is not something to rely on). If it does run inside one, the lock is released and the version recorded *before* that transaction commits: another instance can take the lock and see the version as done while the work is still uncommitted, and if the transaction then rolls back, the version stays recorded as applied and the work is never redone. Let the method open its own transactions inside — `REQUIRES_NEW` repository methods, a `TransactionTemplate` — so that everything it does is committed before the lock is released.
 
 ### Signalling a no-op run with `LockContext.success`
 
