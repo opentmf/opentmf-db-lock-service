@@ -167,11 +167,17 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
     }
   }
 
-  private void sleepUntilNextPoll(LockType lockType) {
+  /**
+   * Waits for the next poll, or gives up when the thread is interrupted. Swallowing the interrupt
+   * and re-setting the flag is not enough here: every later sleep would return at once and the
+   * loop would hammer the database with failed inserts until the acquire timeout.
+   */
+  private void sleepUntilNextPoll(LockType lockType) throws DbLockException {
     try {
       Thread.sleep(lockHelper.getLockAcquirePollInterval(lockType));
-    } catch (InterruptedException ignored) {
+    } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
+      throw new DbLockException("Interrupted while waiting to acquire lock for " + lockType, e);
     }
   }
 
