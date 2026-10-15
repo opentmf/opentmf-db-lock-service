@@ -2,6 +2,7 @@ package org.opentmf.db.lock.dialect;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -89,6 +90,36 @@ abstract class AbstractDialectIT {
     for (String table : LOCK_TABLES) {
       assertDoesNotThrow(() -> countRows(jdbcTemplate, table),
           () -> table + " must be visible to a second connection");
+    }
+  }
+
+  /**
+   * The first recorded release of a lock type inserts its {@code DB_LOCK_LATEST} row; every later
+   * one updates it. That update must work on every dialect: when it fails, the release rolls back,
+   * the lock stays held, and the latest version never moves past the first one recorded.
+   */
+  @Test
+  void laterRecordedReleasesUpdateTheLatestLock() throws Exception {
+    JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource());
+    JdbcHelper.createTables(jdbcTemplate, dialect());
+    DbLockServiceImpl service = new DbLockServiceImpl(jdbcTemplate, testProperties());
+    try {
+      service.releaseLock(service.acquireLock(LockType.LOCK_Y, "1.0"), true);
+      AcquiredLock second = service.acquireLock(LockType.LOCK_Y, "2.0");
+      assertTrue(second.isUpgrade());
+
+      service.releaseLock(second, true);
+
+      assertFalse(service.hasLock(LockType.LOCK_Y), "the release must not leave the lock held");
+      assertEquals("2.0", jdbcTemplate.queryForObject(
+          "select lock_version from DB_LOCK_LATEST where lock_type = 'Y'", String.class));
+      AcquiredLock third = service.acquireLock(LockType.LOCK_Y, "2.0");
+      assertTrue(third.isSameVersion(), "2.0 is already recorded, so it must not run again");
+      service.releaseLock(third, false);
+    } finally {
+      service.destroy();
+      jdbcTemplate.update("delete from DB_LOCK_LATEST where lock_type = 'Y'");
+      jdbcTemplate.update("delete from DB_LOCK_HISTORY where lock_type = 'Y'");
     }
   }
 

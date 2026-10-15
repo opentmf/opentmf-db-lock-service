@@ -54,10 +54,17 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
           + "select lock_type, lock_version, hostname, created_on from DB_LOCK "
           + "where id = ?";
 
-  private static final String SQL_UPDATE_LATEST_LOCK = "update DB_LOCK_LATEST T "
-      + "set lock_version = L.lock_version, hostname = L.hostname, lock_acquired_on = L.created_on "
-      + "from DB_LOCK L "
-      + "where L.id = ? and T.lock_type = L.lock_type";
+  /**
+   * Plain scalar subqueries rather than {@code UPDATE ... FROM}, which is PostgreSQL syntax: MySQL,
+   * Oracle, DB2 and H2 have no such form, and SQL Server rejects the aliased target. Every
+   * placeholder takes the same lock id. When that lock row is gone, the {@code where} matches
+   * nothing, exactly as the join used to.
+   */
+  private static final String SQL_UPDATE_LATEST_LOCK = "update DB_LOCK_LATEST "
+      + "set lock_version = (select L.lock_version from DB_LOCK L where L.id = ?), "
+      + "hostname = (select L.hostname from DB_LOCK L where L.id = ?), "
+      + "lock_acquired_on = (select L.created_on from DB_LOCK L where L.id = ?) "
+      + "where lock_type = (select L.lock_type from DB_LOCK L where L.id = ?)";
 
   private static final String SQL_INSERT_LOCK =
       "insert into DB_LOCK(lock_type, lock_version, hostname) values (?, ?, ?)";
@@ -313,7 +320,13 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
   }
 
   private void updateLatestLock(Connection conn, int lockId) throws SQLException {
-    int count = JdbcHelper.executeUpdate(conn, SQL_UPDATE_LATEST_LOCK, lockId);
+    int count;
+    try (PreparedStatement ps = conn.prepareStatement(SQL_UPDATE_LATEST_LOCK)) {
+      for (int i = 1; i <= 4; i++) {
+        ps.setInt(i, lockId);
+      }
+      count = ps.executeUpdate();
+    }
     if (count == 0) {
       log.warn("Could not update LatestLock using lockId = {}", lockId);
     } else {
