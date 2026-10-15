@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.startsWith;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
@@ -16,6 +17,7 @@ import java.sql.DatabaseMetaData;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.time.OffsetDateTime;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
 import org.mockito.InOrder;
@@ -110,6 +112,52 @@ class DbLockServiceImplTest {
 
     assertFalse(thrown instanceof DbLockTimeoutException, "it gave up, it did not time out");
     verify(insert, times(1)).executeUpdate();
+  }
+
+  /**
+   * Two waiters can both find the same stale lock. The one whose delete matches nothing — the
+   * other already reclaimed it and wrote the history row — must roll back its own copy of that row
+   * rather than commit a duplicate.
+   */
+  @Test
+  void acquireLock_whenAnotherInstanceReclaimedTheStaleLockFirst_rollsBackItsHistoryCopy()
+      throws SQLException, DbLockException {
+    Connection conn = connection(Connection.TRANSACTION_READ_COMMITTED);
+    PreparedStatement insert = mock(PreparedStatement.class);
+    when(conn.prepareStatement(anyString(), any(String[].class))).thenReturn(insert);
+    ResultSet generatedKey = mock(ResultSet.class);
+    when(generatedKey.next()).thenReturn(true);
+    when(generatedKey.getInt(1)).thenReturn(7);
+    when(insert.executeUpdate())
+        .thenThrow(new SQLException("duplicate key value", "23505"))
+        .thenReturn(1);
+    when(insert.getGeneratedKeys()).thenReturn(generatedKey);
+    PreparedStatement existing = mock(PreparedStatement.class);
+    ResultSet staleRow = mock(ResultSet.class);
+    when(conn.prepareStatement(startsWith("select id, lock_version"))).thenReturn(existing);
+    when(existing.executeQuery()).thenReturn(staleRow);
+    when(staleRow.next()).thenReturn(true);
+    when(staleRow.getInt("id")).thenReturn(5);
+    when(staleRow.getObject("created_on", OffsetDateTime.class))
+        .thenReturn(OffsetDateTime.now().minusHours(1));
+    PreparedStatement history = mock(PreparedStatement.class);
+    when(conn.prepareStatement(startsWith("insert into DB_LOCK_HISTORY"))).thenReturn(history);
+    when(history.executeUpdate()).thenReturn(1);
+    PreparedStatement delete = mock(PreparedStatement.class);
+    when(conn.prepareStatement(startsWith("delete from DB_LOCK"))).thenReturn(delete);
+    when(delete.executeUpdate()).thenReturn(0);
+    PreparedStatement latest = mock(PreparedStatement.class);
+    when(conn.prepareStatement(startsWith("select lock_version"))).thenReturn(latest);
+    when(latest.executeQuery()).thenReturn(mock(ResultSet.class));
+    DbLockServiceImpl service = new DbLockServiceImpl(jdbcTemplateFor(conn), properties());
+
+    service.releaseLock(service.acquireLock(LockType.LOCK_X, "1"), false);
+
+    InOrder order = inOrder(history, delete, conn, insert);
+    order.verify(history).executeUpdate();
+    order.verify(delete).executeUpdate();
+    order.verify(conn).rollback();
+    order.verify(insert).executeUpdate();
   }
 
   /** A pooled connection as handed out with auto-commit on and the given isolation level. */

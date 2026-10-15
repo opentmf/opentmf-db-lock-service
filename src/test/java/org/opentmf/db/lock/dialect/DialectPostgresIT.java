@@ -252,6 +252,55 @@ class DialectPostgresIT extends AbstractDialectIT {
     }
   }
 
+  /**
+   * Two releasers of one lock — the hold-timeout firing just as the holder releases — must leave
+   * one history row, not two. Each copies the lock row into the history before deleting it, and
+   * under READ COMMITTED the second still sees the row while the first's delete is uncommitted. The
+   * one whose delete then finds the row gone has to roll its copy back.
+   */
+  @Test
+  void racingReleasersOfOneLockLeaveASingleHistoryRow() throws Exception {
+    String schema = freshSchema("racing_release");
+    try (HikariDataSource pool = pool(schema, true, 4)) {
+      JdbcTemplate jdbcTemplate = new JdbcTemplate(pool);
+      JdbcHelper.createTables(jdbcTemplate, Dialect.POSTGRESQL);
+      DbLockServiceImpl service = new DbLockServiceImpl(jdbcTemplate, new DbLockProperties());
+      AcquiredLock lock = service.acquireLock(LockType.LOCK_Y, "1");
+      ExecutorService executor = Executors.newSingleThreadExecutor();
+      try (Connection firstReleaser = pool.getConnection();
+          Statement first = firstReleaser.createStatement()) {
+        firstReleaser.setAutoCommit(false);
+        first.execute("insert into DB_LOCK_HISTORY "
+            + "(lock_id, lock_type, lock_version, hostname, lock_acquired_on) "
+            + "select id, lock_type, lock_version, hostname, created_on from DB_LOCK "
+            + "where id = " + lock.getLockId());
+        first.execute("delete from DB_LOCK where id = " + lock.getLockId());
+        Future<Void> second = executor.submit(() -> {
+          service.releaseLock(lock, false);
+          return null;
+        });
+        // The second releaser has copied the still-visible row and now waits on the first's delete.
+        await().atMost(Duration.ofSeconds(10)).until(() -> waitingOnARowLock("delete from DB_LOCK"));
+        firstReleaser.commit();
+        second.get(10, TimeUnit.SECONDS);
+      } finally {
+        executor.shutdownNow();
+        service.destroy();
+      }
+
+      assertEquals(1, jdbcTemplate.queryForObject(
+          "select count(*) from DB_LOCK_HISTORY where lock_id = ?", Integer.class,
+          lock.getLockId()));
+    }
+  }
+
+  private boolean waitingOnARowLock(String queryPrefix) {
+    Integer waiting = new JdbcTemplate(dataSource()).queryForObject(
+        "select count(*) from pg_stat_activity where wait_event_type = 'Lock' and query ilike ?",
+        Integer.class, queryPrefix + "%");
+    return waiting != null && waiting > 0;
+  }
+
   private String freshSchema(String schema) {
     JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource());
     jdbcTemplate.execute("drop schema if exists " + schema + " cascade");

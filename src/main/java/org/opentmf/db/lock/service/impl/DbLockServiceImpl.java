@@ -19,6 +19,7 @@ import java.sql.SQLException;
 import java.time.OffsetDateTime;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.Timer;
@@ -141,14 +142,7 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
   @Override
   public void releaseLock(AcquiredLock lock, boolean updateLatestLock) throws DbLockException {
     try {
-      JdbcHelper.inTransaction(jdbcTemplate, conn -> {
-        if (updateLatestLock) {
-          handleLatestLock(conn, lock.getLockId(), lock.getLockType());
-        }
-        insertHistoryRecord(conn, lock.getLockId());
-        deleteLockRecordIfExists(conn, lock);
-        return null;
-      });
+      JdbcHelper.inTransaction(jdbcTemplate, conn -> release(conn, lock, updateLatestLock));
     } catch (SQLException e) {
       log.warn("Failed to release lock id={}, type={}", lock.getLockId(), lock.getLockType(), e);
       throw new DbLockException("Couldn't release lock", e);
@@ -225,10 +219,57 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
             + "created_on={} (expired {}s ago, holdTimeout={}ms)",
         lockType, existing.id(), existing.lockVersion(), existing.hostname(),
         existing.createdOn(), staleSecs, holdTimeout);
-    JdbcHelper.executeUpdate(conn, SQL_INSERT_HISTORY, existing.id());
-    int deleted = JdbcHelper.executeUpdate(conn, SQL_DELETE_LOCK, existing.id(),
-        lockType.getDbValue());
-    return deleted > 0;
+    return moveToHistory(conn, existing.id(), lockType.getDbValue());
+  }
+
+  /**
+   * Copies the lock row into the history and deletes it, keyed on its id. The copy is read from
+   * the row, so it has to come first; when the delete then matches nothing, someone else — the
+   * hold-timeout, another releaser, another instance's reclaim — removed the row in the meantime
+   * and wrote the history row for it, so ours is rolled back rather than committed as a duplicate.
+   * So is anything else the caller wrote in this transaction for a lock that was no longer there.
+   *
+   * @return whether this call removed the lock row
+   */
+  private static boolean moveToHistory(Connection conn, int lockId, String lockTypeValue)
+      throws SQLException {
+    JdbcHelper.executeUpdate(conn, SQL_INSERT_HISTORY, lockId);
+    int deleted = JdbcHelper.executeUpdate(conn, SQL_DELETE_LOCK, lockId, lockTypeValue);
+    if (deleted == 0) {
+      conn.rollback();
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * Releases {@code lock} inside the caller's transaction: the latest-lock record first when asked
+   * for, then the move to the history.
+   *
+   * @return whether this call released the lock; {@code false} when it was already gone
+   */
+  private boolean release(Connection conn, AcquiredLock lock, boolean updateLatestLock)
+      throws SQLException {
+    if (updateLatestLock) {
+      handleLatestLock(conn, lock.getLockId(), lock.getLockType());
+    }
+    if (!moveToHistory(conn, lock.getLockId(), lock.getLockType().getDbValue())) {
+      if (updateLatestLock) {
+        log.warn("Lock id={}, type={} was no longer held when released: its lock-hold-timeout "
+                + "({} ms) released it, or another instance reclaimed it as stale. The work done "
+                + "under it is NOT recorded in DB_LOCK_LATEST.",
+            lock.getLockId(), lock.getLockType(),
+            lockHelper.getLockHoldTimeout(lock.getLockType()));
+      } else {
+        log.trace("releaseLock: No lock exists for lockId = {}, lockType = {}",
+            lock.getLockId(), lock.getLockType());
+      }
+      return false;
+    }
+    log.info("Released lock after {} seconds. lockId = {}, and lockType = {}",
+        ChronoUnit.SECONDS.between(lock.getLockAcquiredAt(), OffsetDateTime.now()),
+        lock.getLockId(), lock.getLockType());
+    return true;
   }
 
   private ExistingLock fetchExistingLock(Connection conn, LockType lockType) throws SQLException {
@@ -240,6 +281,7 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
         }
         return new ExistingLock(
             rs.getInt("id"),
+            lockType.getDbValue(),
             rs.getString("lock_version"),
             rs.getString("hostname"),
             rs.getObject("created_on", OffsetDateTime.class));
@@ -248,7 +290,7 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
   }
 
   private record ExistingLock(
-      int id, String lockVersion, String hostname, OffsetDateTime createdOn) {
+      int id, String lockType, String lockVersion, String hostname, OffsetDateTime createdOn) {
   }
 
   private void createLockReleaseTimer(AcquiredLock acquiredLock) {
@@ -282,20 +324,6 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
     LatestLock latestLock = JdbcHelper.getLatestLock(conn, SQL_GET_LATEST_LOCK,
         lockType.getDbValue());
     return AcquiredLock.of(lockId, lockType, lockVersion, latestLock);
-  }
-
-  private void deleteLockRecordIfExists(Connection conn, AcquiredLock lock)
-      throws SQLException {
-    int count = JdbcHelper.executeUpdate(conn, SQL_DELETE_LOCK, lock.getLockId(),
-        lock.getLockType().getDbValue());
-    if (count == 0) {
-      log.trace("releaseLock: No lock exists for lockId = {}, lockType = {}",
-          lock.getLockId(), lock.getLockType());
-    } else {
-      log.info("Released lock after {} seconds. lockId = {}, and lockType = {}",
-          ChronoUnit.SECONDS.between(lock.getLockAcquiredAt(), OffsetDateTime.now()),
-              lock.getLockId(), lock.getLockType());
-    }
   }
 
   private void handleLatestLock(Connection conn, int lockId, LockType lockType)
@@ -332,13 +360,6 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
     }
   }
 
-  private void insertHistoryRecord(Connection conn, int lockId) throws SQLException {
-    int count = JdbcHelper.executeUpdate(conn, SQL_INSERT_HISTORY, lockId);
-    if (count == 0) {
-      log.trace("insertHistoryRecord: No lock exists for lockId = {}", lockId);
-    }
-  }
-
   @Override
   public void destroy() {
     log.info("Destroying DbLockService");
@@ -359,44 +380,54 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
    * configured lock-hold-timeout for its type. Intended to be called once at startup.
    */
   public void removeStaleLocks() {
+    List<ExistingLock> locks;
     try {
-      JdbcHelper.inTransaction(jdbcTemplate, conn -> {
-        removeStaleLocks(conn);
-        return null;
-      });
+      locks = JdbcHelper.inTransaction(jdbcTemplate, DbLockServiceImpl::fetchAllLocks);
     } catch (SQLException e) {
       log.warn("Failed to clean up stale locks on startup", e);
+      return;
     }
-  }
-
-  private void removeStaleLocks(Connection conn) throws SQLException {
-    try (PreparedStatement ps = conn.prepareStatement(SQL_SELECT_ALL_LOCKS);
-         ResultSet rs = ps.executeQuery()) {
-      while (rs.next()) {
-        int lockId = rs.getInt("id");
-        String lockTypeValue = rs.getString("lock_type").trim();
-        String lockVersion = rs.getString("lock_version");
-        String hostname = rs.getString("hostname");
-        OffsetDateTime createdOn = rs.getObject("created_on", OffsetDateTime.class);
-
-        LockType lockType = LockType.fromDbValue(lockTypeValue);
-        if (lockType == null) {
-          log.warn("Skipping lock id={} with unknown lock_type '{}'", lockId, lockTypeValue);
-          continue;
-        }
-
-        long holdTimeout = lockHelper.getLockHoldTimeout(lockType);
-        OffsetDateTime expiresAt = createdOn.plus(holdTimeout, ChronoUnit.MILLIS);
-        if (expiresAt.isBefore(OffsetDateTime.now())) {
-          long staleSecs = ChronoUnit.SECONDS.between(expiresAt, OffsetDateTime.now());
-          log.warn("Removing stale lock: id={}, type={}, version={}, hostname={}, "
-                  + "created_on={} (expired {}s ago, holdTimeout={}ms)",
-              lockId, lockType, lockVersion, hostname, createdOn, staleSecs, holdTimeout);
-          JdbcHelper.executeUpdate(conn, SQL_INSERT_HISTORY, lockId);
-          JdbcHelper.executeUpdate(conn, SQL_DELETE_LOCK, lockId, lockTypeValue);
+    for (ExistingLock existing : locks) {
+      LockType lockType = LockType.fromDbValue(existing.lockType());
+      if (lockType == null) {
+        log.warn("Skipping lock id={} with unknown lock_type '{}'",
+            existing.id(), existing.lockType());
+        continue;
+      }
+      long holdTimeout = lockHelper.getLockHoldTimeout(lockType);
+      OffsetDateTime expiresAt = existing.createdOn().plus(holdTimeout, ChronoUnit.MILLIS);
+      if (expiresAt.isBefore(OffsetDateTime.now())) {
+        long staleSecs = ChronoUnit.SECONDS.between(expiresAt, OffsetDateTime.now());
+        log.warn("Removing stale lock: id={}, type={}, version={}, hostname={}, "
+                + "created_on={} (expired {}s ago, holdTimeout={}ms)",
+            existing.id(), lockType, existing.lockVersion(), existing.hostname(),
+            existing.createdOn(), staleSecs, holdTimeout);
+        try {
+          // Each stale row is moved in its own transaction, so a row another instance removed
+          // in the meantime rolls back only its own history copy.
+          JdbcHelper.inTransaction(jdbcTemplate,
+              conn -> moveToHistory(conn, existing.id(), existing.lockType()));
+        } catch (SQLException e) {
+          log.warn("Failed to remove stale lock id={} on startup", existing.id(), e);
         }
       }
     }
+  }
+
+  private static List<ExistingLock> fetchAllLocks(Connection conn) throws SQLException {
+    List<ExistingLock> locks = new ArrayList<>();
+    try (PreparedStatement ps = conn.prepareStatement(SQL_SELECT_ALL_LOCKS);
+         ResultSet rs = ps.executeQuery()) {
+      while (rs.next()) {
+        locks.add(new ExistingLock(
+            rs.getInt("id"),
+            rs.getString("lock_type").trim(),
+            rs.getString("lock_version"),
+            rs.getString("hostname"),
+            rs.getObject("created_on", OffsetDateTime.class)));
+      }
+    }
+    return locks;
   }
 
   @RequiredArgsConstructor
