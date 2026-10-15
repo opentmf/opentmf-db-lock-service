@@ -175,25 +175,37 @@ public final class JdbcHelper {
     Assert.notNull(dataSource, "DataSource cannot be obtained during DB_Lock service init");
     try (Connection conn = dataSource.getConnection()) {
       logMetaData(conn.getMetaData(), conn.getSchema());
-      EncodedResource script = new EncodedResource(ddlScript);
-      try {
-        executeInOwnTransaction(conn, script, separator);
-      } catch (SQLException | ScriptException firstAttempt) {
-        // Instances starting together against an empty schema race on CREATE TABLE IF NOT
-        // EXISTS, which PostgreSQL does not guard against a concurrent creator: once the first
-        // one commits, the others fail on a duplicate key in pg_class. The scripts are
-        // idempotent, so one more run, which finds the winner's tables, settles it.
-        log.info("Lock-table DDL failed ({}); running it once more, as another instance starting "
-            + "at the same time may have created the tables first.", firstAttempt.getMessage());
-        try {
-          executeInOwnTransaction(conn, script, separator);
-        } catch (SQLException | ScriptException secondAttempt) {
-          secondAttempt.addSuppressed(firstAttempt);
-          throw secondAttempt;
-        }
-      }
+      executeWithOneRetry(conn, new EncodedResource(ddlScript), separator);
     } catch (SQLException e) {
       throw new IllegalStateException("Unable to initialize the database.", e);
+    }
+  }
+
+  /**
+   * Runs the script, and once more if it fails. Instances starting together against an empty
+   * schema race on {@code CREATE TABLE IF NOT EXISTS}, which PostgreSQL does not guard against a
+   * concurrent creator: once the first one commits, the others fail on a duplicate key in
+   * {@code pg_class}. The scripts are idempotent, so one more run, which finds the winner's
+   * tables, settles it; a script failing for any other reason fails again.
+   */
+  private static void executeWithOneRetry(
+      Connection conn, EncodedResource script, String separator) throws SQLException {
+    try {
+      executeInOwnTransaction(conn, script, separator);
+    } catch (SQLException | ScriptException firstAttempt) {
+      log.info("Lock-table DDL failed ({}); running it once more, as another instance starting "
+          + "at the same time may have created the tables first.", firstAttempt.getMessage());
+      executeAgain(conn, script, separator, firstAttempt);
+    }
+  }
+
+  private static void executeAgain(Connection conn, EncodedResource script, String separator,
+      Exception firstAttempt) throws SQLException {
+    try {
+      executeInOwnTransaction(conn, script, separator);
+    } catch (SQLException | ScriptException secondAttempt) {
+      secondAttempt.addSuppressed(firstAttempt);
+      throw secondAttempt;
     }
   }
 

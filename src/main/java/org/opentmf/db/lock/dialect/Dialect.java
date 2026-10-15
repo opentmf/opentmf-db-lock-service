@@ -14,12 +14,21 @@ import java.util.Locale;
  */
 public enum Dialect {
 
-  POSTGRESQL("postgresql", "db/postgresql.sql", ";", "CURRENT_TIMESTAMP"),
-  MYSQL("mysql", "db/mysql.sql", ";", "CURRENT_TIMESTAMP"),
-  ORACLE("oracle", "db/oracle.sql", "/", "CURRENT_TIMESTAMP"),
+  POSTGRESQL("postgresql", "db/postgresql.sql", ";", Sql.CURRENT_TIMESTAMP),
+  MYSQL("mysql", "db/mysql.sql", ";", Sql.CURRENT_TIMESTAMP),
+  ORACLE("oracle", "db/oracle.sql", "/", Sql.CURRENT_TIMESTAMP),
   SQLSERVER("sqlserver", "db/sqlserver.sql", ";", "SYSDATETIMEOFFSET()"),
   DB2("db2", "db/db2.sql", "/", "CURRENT TIMESTAMP"),
-  H2("h2", "db/h2.sql", ";", "CURRENT_TIMESTAMP");
+  H2("h2", "db/h2.sql", ";", Sql.CURRENT_TIMESTAMP);
+
+  /**
+   * SQL shared by several entries. It lives in a holder because the enum constants, declared
+   * first, may not refer forward to a static field of the enum itself.
+   */
+  private static final class Sql {
+
+    static final String CURRENT_TIMESTAMP = "CURRENT_TIMESTAMP";
+  }
 
   private final String id;
   private final String ddlResourcePath;

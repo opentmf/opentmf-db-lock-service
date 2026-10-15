@@ -336,18 +336,20 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
     try (PreparedStatement ps = conn.prepareStatement(queries.selectLockByType())) {
       ps.setString(1, lockType.getDbValue());
       try (ResultSet rs = ps.executeQuery()) {
-        if (!rs.next()) {
-          return null;
-        }
-        return new ExistingLock(
-            rs.getInt("id"),
-            lockType.getDbValue(),
-            rs.getString("lock_version"),
-            rs.getString("hostname"),
-            JdbcHelper.getOffsetDateTime(rs, "created_on"),
-            queries.now(rs));
+        return rs.next() ? readLock(rs, lockType.getDbValue(), queries) : null;
       }
     }
+  }
+
+  private static ExistingLock readLock(ResultSet rs, String lockType, AgeQueries queries)
+      throws SQLException {
+    return new ExistingLock(
+        rs.getInt("id"),
+        lockType,
+        rs.getString("lock_version"),
+        rs.getString("hostname"),
+        JdbcHelper.getOffsetDateTime(rs, "created_on"),
+        queries.now(rs));
   }
 
   /** A lock row as read, with the time it was read at by the clock that judges its age. */
@@ -545,13 +547,7 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
     try (PreparedStatement ps = conn.prepareStatement(queries.selectAllLocks());
          ResultSet rs = ps.executeQuery()) {
       while (rs.next()) {
-        locks.add(new ExistingLock(
-            rs.getInt("id"),
-            rs.getString("lock_type").trim(),
-            rs.getString("lock_version"),
-            rs.getString("hostname"),
-            JdbcHelper.getOffsetDateTime(rs, "created_on"),
-            queries.now(rs)));
+        locks.add(readLock(rs, rs.getString("lock_type").trim(), queries));
       }
     }
     return locks;

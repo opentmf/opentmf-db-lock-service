@@ -184,10 +184,11 @@ class DialectPostgresIT extends AbstractDialectIT {
     String schema = freshSchema("failing_script");
     try (HikariDataSource pool = pool(schema, true)) {
       JdbcTemplate jdbcTemplate = new JdbcTemplate(pool);
-      Resource failing = script("begin transaction;\n"
-          + "create table USER_DB_LOCK (id int primary key);\n"
-          + "select * from no_such_table;\n"
-          + "commit transaction;");
+      Resource failing = script("""
+          begin transaction;
+          create table USER_DB_LOCK (id int primary key);
+          select * from no_such_table;
+          commit transaction;""");
 
       assertThrows(RuntimeException.class, () -> JdbcHelper.createTables(jdbcTemplate, failing));
 
