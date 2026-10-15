@@ -4,13 +4,21 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
-## [2.2.3] - 2026-10-15
+## [3.0.0] - 2026-10-15
 
 A review of the library's transaction handling. Nothing here changes how a
 lock is taken — a single `INSERT` guarded by the unique index on `lock_type`
 — but the transactions around it now end explicitly on every path, and the
 decisions the lock makes no longer depend on the pool's defaults, the
 isolation level or the JVM's clock.
+
+### Removed
+- **`JdbcHelper.createTables(JdbcTemplate)`**, deprecated for removal since
+  2.2.0. Removing published API is a binary-compatibility break, which is why
+  this release is 3.0.0 rather than 2.2.3; nothing else in it breaks binary
+  compatibility. Callers move to `createTables(JdbcTemplate, Dialect)` —
+  `Dialect.POSTGRESQL` reproduces what the removed overload did — or to
+  `createTables(JdbcTemplate, Resource)` for a script of their own.
 
 ### Fixed
 - **The lock tables and the `lock_version` widening persist under a pool

@@ -83,7 +83,7 @@ opentmf:
 The hold-timeout does two jobs at once:
 
 1. **The holder's own kill-switch.** When a lock is still held this long after it was acquired, the instance holding it releases it in the background (one daemon thread per service instance runs these).
-2. **The staleness threshold for everybody else.** A lock older than the hold-timeout is treated as left behind by a crashed or hung holder: a waiting instance reclaims it on the spot, and the startup sweep removes it. A lock's age is measured with the database's own clock (since 2.2.3).
+2. **The staleness threshold for everybody else.** A lock older than the hold-timeout is treated as left behind by a crashed or hung holder: a waiting instance reclaims it on the spot, and the startup sweep removes it. A lock's age is measured with the database's own clock (since 3.0.0).
 
 So it is not a soft limit. Work that runs longer than the hold-timeout **loses the lock while it is still running**, and another instance may then take the lock and start the same work concurrently. When the original holder finally finishes and releases, its lock is already gone: nothing is recorded in `DB_LOCK_LATEST` for that run, and a warning says so. Set the hold-timeout (per lock type if needed) comfortably above the longest legitimate run of the work it guards.
 
@@ -108,8 +108,8 @@ Resolution order when `create-tables: true` (first match wins):
 3. Auto-detection via JDBC metadata.
 
 Notes:
-- **MySQL timestamp semantics.** MySQL has no `TIMESTAMP WITH TIME ZONE`. The shipped DDL uses plain `TIMESTAMP`, which MySQL stores as UTC internally and converts to the session time zone on read. Run both the application JVM and the MySQL server with `time_zone = UTC` to avoid drift in the timestamps you read back. Since 2.2.3 the lock's own decisions — how old a held lock is, how long ago a version was recorded — are measured with the database's clock, so a time-zone mismatch no longer makes a live lock look stale; up to 2.2.2 it did, and another instance took the lock from its live holder.
-- **DB2 LUW timestamp semantics.** DB2 LUW has no `TIMESTAMP WITH TIME ZONE` either (that form is DB2 for z/OS only). The shipped DDL uses plain `TIMESTAMP`; same UTC guidance, and the same 2.2.3 change, as for MySQL.
+- **MySQL timestamp semantics.** MySQL has no `TIMESTAMP WITH TIME ZONE`. The shipped DDL uses plain `TIMESTAMP`, which MySQL stores as UTC internally and converts to the session time zone on read. Run both the application JVM and the MySQL server with `time_zone = UTC` to avoid drift in the timestamps you read back. Since 3.0.0 the lock's own decisions — how old a held lock is, how long ago a version was recorded — are measured with the database's clock, so a time-zone mismatch no longer makes a live lock look stale; up to 2.2.2 it did, and another instance took the lock from its live holder.
+- **DB2 LUW timestamp semantics.** DB2 LUW has no `TIMESTAMP WITH TIME ZONE` either (that form is DB2 for z/OS only). The shipped DDL uses plain `TIMESTAMP`; same UTC guidance, and the same 3.0.0 change, as for MySQL.
 - **Oracle / DB2 DDL files** use `/` as their statement separator (not `;`) because their scripts contain PL/SQL / compound-SQL blocks with embedded semicolons. This is handled internally by the library — it's only relevant if you edit those files.
 - **CockroachDB, Aurora-PostgreSQL, Yugabyte** identify themselves as PostgreSQL; auto-detection picks `POSTGRESQL` and the PG DDL runs. The library's DDL uses no PostgreSQL-specific features these forks don't support.
 
