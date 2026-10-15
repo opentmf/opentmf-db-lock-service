@@ -38,8 +38,18 @@ class DialectMySqlIT extends AbstractDialectIT {
   @Test
   void aLockWithinItsHoldTimeoutIsNotReclaimed_whenTheDriverAssumesAnotherTimeZone()
       throws Exception {
+    assertALockWithinItsHoldTimeoutIsNotReclaimed(dataSourceAssumingAnotherTimeZone());
+  }
+
+  @Test
+  void aRecentlyRecordedVersionDoesNotYetAllowADowngrade_whenTheDriverAssumesAnotherTimeZone()
+      throws Exception {
+    assertARecentlyRecordedVersionDoesNotYetAllowADowngrade(dataSourceAssumingAnotherTimeZone());
+  }
+
+  private DataSource dataSourceAssumingAnotherTimeZone() {
     DriverManagerDataSource ds = (DriverManagerDataSource) dataSource();
     ds.setUrl(CONTAINER.getJdbcUrl().replace("serverTimezone=UTC", "serverTimezone=Asia/Karachi"));
-    assertALockWithinItsHoldTimeoutIsNotReclaimed(ds);
+    return ds;
   }
 }

@@ -166,7 +166,8 @@ abstract class AbstractDialectIT {
       AcquiredLock acquired = waiter.get(10, TimeUnit.SECONDS);
       waiterPod.releaseLock(acquired, false);
       assertTrue(acquired.isSameVersion(),
-          () -> "2.0 was recorded while the waiter slept, yet it saw " + acquired.getPreviousLock());
+          () -> "2.0 was recorded while the waiter slept, yet it saw "
+              + acquired.getPreviousLock());
     } finally {
       executor.shutdownNow();
       holderPod.destroy();
@@ -235,6 +236,38 @@ abstract class AbstractDialectIT {
       waiterPod.destroy();
       jdbcTemplate.update("delete from DB_LOCK where lock_type = 'B'");
       jdbcTemplate.update("delete from DB_LOCK_HISTORY where lock_type = 'B'");
+    }
+  }
+
+  @Test
+  void aRecentlyRecordedVersionDoesNotYetAllowADowngrade() throws Exception {
+    assertARecentlyRecordedVersionDoesNotYetAllowADowngrade(dataSource());
+  }
+
+  /**
+   * A downgrade is allowed only once the latest version has been recorded for longer than the
+   * configured period, and that period has to be measured with the database's clock: the record
+   * is stamped by the database, and with a plain {@code TIMESTAMP} column (MySQL, DB2) read in a
+   * time zone other than the server's a record seconds old looked hours old to the JVM's clock.
+   */
+  protected void assertARecentlyRecordedVersionDoesNotYetAllowADowngrade(DataSource dataSource)
+      throws Exception {
+    JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource);
+    JdbcHelper.createTables(jdbcTemplate, dialect());
+    DbLockServiceImpl service = new DbLockServiceImpl(jdbcTemplate, testProperties());
+    try {
+      service.releaseLock(service.acquireLock(LockType.CATALOG, "2.0"), true);
+
+      AcquiredLock downgrade = service.acquireLock(LockType.CATALOG, "1.0");
+      service.releaseLock(downgrade, false);
+
+      assertTrue(downgrade.isDowngrade());
+      assertFalse(downgrade.isDowngradeAllowed(Duration.ofHours(1).toMillis()),
+          () -> "2.0 was recorded seconds ago: " + downgrade.getPreviousLock());
+    } finally {
+      service.destroy();
+      jdbcTemplate.update("delete from DB_LOCK_LATEST where lock_type = 'C'");
+      jdbcTemplate.update("delete from DB_LOCK_HISTORY where lock_type = 'C'");
     }
   }
 

@@ -8,7 +8,9 @@ import java.sql.DatabaseMetaData;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.time.LocalDateTime;
 import java.time.OffsetDateTime;
+import java.time.ZoneId;
 import java.util.Objects;
 import javax.sql.DataSource;
 import lombok.Generated;
@@ -115,8 +117,32 @@ public final class JdbcHelper {
       logSql(ps);
       ResultSet rs = ps.executeQuery();
       return rs.next()
-          ? new LatestLock(rs.getString(1), rs.getObject(2, OffsetDateTime.class))
+          ? new LatestLock(rs.getString(1),
+              getOffsetDateTime(rs, rs.getMetaData().getColumnLabel(2)))
           : null;
+    }
+  }
+
+  /**
+   * Reads a timestamp column as an {@link OffsetDateTime}. Most drivers convert a plain
+   * {@code TIMESTAMP} as readily as a {@code TIMESTAMP WITH TIME ZONE}, but DB2's JCC driver
+   * refuses ({@code ERRORCODE=-4461, SQLSTATE=42815}); such a column is read as a
+   * {@link LocalDateTime} and placed in this JVM's time zone instead — the convention the bundled
+   * DDL documents for a plain {@code TIMESTAMP}. Every timestamp the library compares is read
+   * through here, so two values of one row stay comparable whichever way they were read.
+   */
+  public static OffsetDateTime getOffsetDateTime(ResultSet rs, String column)
+      throws SQLException {
+    try {
+      return rs.getObject(column, OffsetDateTime.class);
+    } catch (SQLException notConvertible) {
+      try {
+        LocalDateTime local = rs.getObject(column, LocalDateTime.class);
+        return local == null ? null : local.atZone(ZoneId.systemDefault()).toOffsetDateTime();
+      } catch (SQLException e) {
+        e.addSuppressed(notConvertible);
+        throw e;
+      }
     }
   }
 

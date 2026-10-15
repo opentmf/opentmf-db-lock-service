@@ -1,6 +1,8 @@
 package org.opentmf.db.lock.util;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
@@ -18,6 +20,9 @@ import java.sql.DatabaseMetaData;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.time.LocalDateTime;
+import java.time.OffsetDateTime;
+import java.time.ZoneId;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
 import org.mockito.InOrder;
@@ -169,6 +174,44 @@ class JdbcHelperTest {
     InOrder order = inOrder(conn);
     order.verify(conn).rollback();
     order.verify(conn).commit();
+  }
+
+  /** DB2's JCC refuses OffsetDateTime for a plain TIMESTAMP; the JVM's zone is applied. */
+  @Test
+  void getOffsetDateTime_whenTheDriverRefusesTheConversion_readsALocalDateTimeInTheJvmZone()
+      throws SQLException {
+    ResultSet rs = mock(ResultSet.class);
+    LocalDateTime stamped = LocalDateTime.of(2026, 10, 15, 6, 0);
+    when(rs.getObject("created_on", OffsetDateTime.class)).thenThrow(new SQLException(
+        "Invalid data conversion: Wrong result column type for requested conversion.", "42815"));
+    when(rs.getObject("created_on", LocalDateTime.class)).thenReturn(stamped);
+
+    assertEquals(stamped.atZone(ZoneId.systemDefault()).toOffsetDateTime(),
+        JdbcHelper.getOffsetDateTime(rs, "created_on"));
+  }
+
+  @Test
+  void getOffsetDateTime_whenBothReadsFail_propagatesTheSecondWithTheFirstSuppressed()
+      throws SQLException {
+    ResultSet rs = mock(ResultSet.class);
+    SQLException first = new SQLException("no OffsetDateTime");
+    SQLException second = new SQLException("no LocalDateTime either");
+    when(rs.getObject("db_now", OffsetDateTime.class)).thenThrow(first);
+    when(rs.getObject("db_now", LocalDateTime.class)).thenThrow(second);
+
+    SQLException thrown =
+        assertThrows(SQLException.class, () -> JdbcHelper.getOffsetDateTime(rs, "db_now"));
+
+    assertSame(second, thrown);
+    assertSame(first, thrown.getSuppressed()[0]);
+  }
+
+  @Test
+  void getOffsetDateTime_readsANullTimestampAsNull() throws SQLException {
+    ResultSet rs = mock(ResultSet.class);
+    when(rs.getObject("db_now", OffsetDateTime.class)).thenThrow(new SQLException("refused"));
+
+    assertNull(JdbcHelper.getOffsetDateTime(rs, "db_now"));
   }
 
   @Test

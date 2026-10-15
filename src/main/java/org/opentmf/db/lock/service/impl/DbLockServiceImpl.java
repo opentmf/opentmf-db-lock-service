@@ -43,7 +43,7 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
   private final DurationHelper lockHelper;
   private final Dialect configuredDialect;
 
-  /** The reads that judge a lock's age, resolved once from the first connection that needs them. */
+  /** Resolved once, from the first connection that needs them. */
   private final AtomicReference<AgeQueries> ageQueries = new AtomicReference<>();
 
   public DbLockServiceImpl(JdbcTemplate jdbcTemplate, DbLockProperties dbLockProperties) {
@@ -85,9 +85,6 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
   private static final String SQL_DELETE_LOCK =
       "delete from DB_LOCK where id = ? and lock_type = ?";
 
-  private static final String SQL_GET_LATEST_LOCK =
-      "select lock_version, lock_acquired_on from DB_LOCK_LATEST where lock_type = ?";
-
   private static final String SQL_INSERT_HISTORY =
       "insert into DB_LOCK_HISTORY (lock_id, lock_type, lock_version, hostname, lock_acquired_on) "
           + "select id, lock_type, lock_version, hostname, created_on "
@@ -95,18 +92,20 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
           + "where DB_LOCK.id = ?";
 
   /**
-   * The two reads that decide whether a lock is stale, each also returning the database's own
-   * current time as {@code db_now} so the lock's age is measured with the clock that stamped its
-   * {@code created_on}. For a database the library does not know they return no {@code db_now}
-   * and the JVM's clock stands in, as before.
+   * The reads behind every time-based decision — is a held lock stale, how long ago was the latest
+   * version recorded — each also returning the database's own current time as {@code db_now}, so
+   * an age is measured with the clock that stamped the row. For a database the library does not
+   * know they return no {@code db_now} and the JVM's clock stands in, as before.
    */
-  private record AgeQueries(String selectLockByType, String selectAllLocks, boolean dbClock) {
+  private record AgeQueries(String selectLockByType, String selectAllLocks,
+      String selectLatestLock, boolean dbClock) {
 
     static AgeQueries forDialect(Dialect dialect) {
       if (dialect == null) {
         return new AgeQueries(
             "select id, lock_version, hostname, created_on from DB_LOCK where lock_type = ?",
             "select id, lock_type, lock_version, hostname, created_on from DB_LOCK",
+            "select lock_version, lock_acquired_on from DB_LOCK_LATEST where lock_type = ?",
             false);
       }
       String now = dialect.getCurrentTimestampSql();
@@ -115,11 +114,18 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
               + " as db_now from DB_LOCK where lock_type = ?",
           "select id, lock_type, lock_version, hostname, created_on, " + now
               + " as db_now from DB_LOCK",
+          "select lock_version, lock_acquired_on, " + now
+              + " as db_now from DB_LOCK_LATEST where lock_type = ?",
           true);
     }
 
     OffsetDateTime now(ResultSet rs) throws SQLException {
-      return dbClock ? rs.getObject("db_now", OffsetDateTime.class) : OffsetDateTime.now();
+      return dbClock ? JdbcHelper.getOffsetDateTime(rs, "db_now") : OffsetDateTime.now();
+    }
+
+    /** When the row was read by the database's clock; null without it, for the JVM to stand in. */
+    OffsetDateTime readAt(ResultSet rs) throws SQLException {
+      return dbClock ? JdbcHelper.getOffsetDateTime(rs, "db_now") : null;
     }
   }
 
@@ -338,7 +344,7 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
             lockType.getDbValue(),
             rs.getString("lock_version"),
             rs.getString("hostname"),
-            rs.getObject("created_on", OffsetDateTime.class),
+            JdbcHelper.getOffsetDateTime(rs, "created_on"),
             queries.now(rs));
       }
     }
@@ -424,9 +430,25 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
   private AcquiredLock getLockDetails(Connection conn, int lockId, LockType lockType,
       String lockVersion) throws SQLException {
 
-    LatestLock latestLock = JdbcHelper.getLatestLock(conn, SQL_GET_LATEST_LOCK,
-        lockType.getDbValue());
+    LatestLock latestLock = fetchLatestLock(conn, lockType);
     return AcquiredLock.of(lockId, lockType, lockVersion, latestLock);
+  }
+
+  /**
+   * The latest version recorded for {@code lockType}, read together with the database's time so a
+   * downgrade's waiting period is measured by the clock that stamped the record.
+   */
+  private LatestLock fetchLatestLock(Connection conn, LockType lockType) throws SQLException {
+    AgeQueries queries = ageQueries(conn);
+    try (PreparedStatement ps = conn.prepareStatement(queries.selectLatestLock())) {
+      ps.setString(1, lockType.getDbValue());
+      try (ResultSet rs = ps.executeQuery()) {
+        return rs.next()
+            ? new LatestLock(rs.getString("lock_version"),
+                JdbcHelper.getOffsetDateTime(rs, "lock_acquired_on"), queries.readAt(rs))
+            : null;
+      }
+    }
   }
 
   private void handleLatestLock(Connection conn, int lockId, LockType lockType)
@@ -528,7 +550,7 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
             rs.getString("lock_type").trim(),
             rs.getString("lock_version"),
             rs.getString("hostname"),
-            rs.getObject("created_on", OffsetDateTime.class),
+            JdbcHelper.getOffsetDateTime(rs, "created_on"),
             queries.now(rs)));
       }
     }

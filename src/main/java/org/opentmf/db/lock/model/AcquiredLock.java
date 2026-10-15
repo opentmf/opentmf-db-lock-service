@@ -1,5 +1,6 @@
 package org.opentmf.db.lock.model;
 
+import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.time.temporal.ChronoUnit;
 import lombok.AccessLevel;
@@ -73,6 +74,20 @@ public final class AcquiredLock {
    */
   public boolean isDowngradeAllowed(long downgradeAllowedAfter) {
     return getPreviousLock().getLockReleasedAt().isBefore(
-        OffsetDateTime.now().minus(downgradeAllowedAfter, ChronoUnit.MILLIS));
+        databaseNow().minus(downgradeAllowedAfter, ChronoUnit.MILLIS));
+  }
+
+  /**
+   * The current time by the clock that stamped the previous lock's record: the database's time
+   * when the record was read, plus what has elapsed here since. Comparing that record with this
+   * JVM's clock instead lets clock skew, or a plain {@code TIMESTAMP} column read in a time zone
+   * other than the server's (MySQL, DB2), shift the downgrade window by hours.
+   */
+  private OffsetDateTime databaseNow() {
+    OffsetDateTime readAt = previousLock.getReadAt();
+    if (readAt == null) {
+      return OffsetDateTime.now();
+    }
+    return readAt.plus(Duration.between(lockAcquiredAt, OffsetDateTime.now()));
   }
 }
