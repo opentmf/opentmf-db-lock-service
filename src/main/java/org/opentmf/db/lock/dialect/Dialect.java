@@ -14,21 +14,24 @@ import java.util.Locale;
  */
 public enum Dialect {
 
-  POSTGRESQL("postgresql", "db/postgresql.sql", ";"),
-  MYSQL("mysql", "db/mysql.sql", ";"),
-  ORACLE("oracle", "db/oracle.sql", "/"),
-  SQLSERVER("sqlserver", "db/sqlserver.sql", ";"),
-  DB2("db2", "db/db2.sql", "/"),
-  H2("h2", "db/h2.sql", ";");
+  POSTGRESQL("postgresql", "db/postgresql.sql", ";", "CURRENT_TIMESTAMP"),
+  MYSQL("mysql", "db/mysql.sql", ";", "CURRENT_TIMESTAMP"),
+  ORACLE("oracle", "db/oracle.sql", "/", "CURRENT_TIMESTAMP"),
+  SQLSERVER("sqlserver", "db/sqlserver.sql", ";", "SYSDATETIMEOFFSET()"),
+  DB2("db2", "db/db2.sql", "/", "CURRENT TIMESTAMP"),
+  H2("h2", "db/h2.sql", ";", "CURRENT_TIMESTAMP");
 
   private final String id;
   private final String ddlResourcePath;
   private final String statementSeparator;
+  private final String currentTimestampSql;
 
-  Dialect(String id, String ddlResourcePath, String statementSeparator) {
+  Dialect(String id, String ddlResourcePath, String statementSeparator,
+      String currentTimestampSql) {
     this.id = id;
     this.ddlResourcePath = ddlResourcePath;
     this.statementSeparator = statementSeparator;
+    this.currentTimestampSql = currentTimestampSql;
   }
 
   /**
@@ -52,6 +55,17 @@ public enum Dialect {
    */
   public String getStatementSeparator() {
     return statementSeparator;
+  }
+
+  /**
+   * Returns the SQL expression for the database's current time, of the same type and from the
+   * same clock as the {@code created_on} default in the bundled DDL. The age of a lock is measured
+   * against it rather than the JVM's clock: that keeps clock skew out, and with it the time-zone
+   * misreading a plain {@code TIMESTAMP} column (MySQL, DB2) suffers when the driver's assumed time
+   * zone is not the server's, since both values are read back the same way.
+   */
+  public String getCurrentTimestampSql() {
+    return currentTimestampSql;
   }
 
   /**

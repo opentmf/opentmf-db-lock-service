@@ -2,6 +2,8 @@ package org.opentmf.db.lock.service.impl;
 
 
 import org.opentmf.db.lock.config.DbLockProperties;
+import org.opentmf.db.lock.dialect.Dialect;
+import org.opentmf.db.lock.dialect.DialectDetector;
 import org.opentmf.db.lock.exception.DbLockException;
 import org.opentmf.db.lock.exception.DbLockTimeoutException;
 import org.opentmf.db.lock.model.AcquiredLock;
@@ -26,6 +28,7 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.DisposableBean;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -38,10 +41,15 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
 
   private final JdbcTemplate jdbcTemplate;
   private final DurationHelper lockHelper;
+  private final Dialect configuredDialect;
+
+  /** The reads that judge a lock's age, resolved once from the first connection that needs them. */
+  private final AtomicReference<AgeQueries> ageQueries = new AtomicReference<>();
 
   public DbLockServiceImpl(JdbcTemplate jdbcTemplate, DbLockProperties dbLockProperties) {
     this.jdbcTemplate = jdbcTemplate;
     lockHelper = new DurationHelper(dbLockProperties);
+    configuredDialect = dbLockProperties.getDialect();
   }
 
   /** The armed hold-timeout of every lock this instance holds. */
@@ -86,11 +94,52 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
           + "from DB_LOCK "
           + "where DB_LOCK.id = ?";
 
-  private static final String SQL_SELECT_ALL_LOCKS =
-      "select id, lock_type, lock_version, hostname, created_on from DB_LOCK";
+  /**
+   * The two reads that decide whether a lock is stale, each also returning the database's own
+   * current time as {@code db_now} so the lock's age is measured with the clock that stamped its
+   * {@code created_on}. For a database the library does not know they return no {@code db_now}
+   * and the JVM's clock stands in, as before.
+   */
+  private record AgeQueries(String selectLockByType, String selectAllLocks, boolean dbClock) {
 
-  private static final String SQL_SELECT_LOCK_BY_TYPE =
-      "select id, lock_version, hostname, created_on from DB_LOCK where lock_type = ?";
+    static AgeQueries forDialect(Dialect dialect) {
+      if (dialect == null) {
+        return new AgeQueries(
+            "select id, lock_version, hostname, created_on from DB_LOCK where lock_type = ?",
+            "select id, lock_type, lock_version, hostname, created_on from DB_LOCK",
+            false);
+      }
+      String now = dialect.getCurrentTimestampSql();
+      return new AgeQueries(
+          "select id, lock_version, hostname, created_on, " + now
+              + " as db_now from DB_LOCK where lock_type = ?",
+          "select id, lock_type, lock_version, hostname, created_on, " + now
+              + " as db_now from DB_LOCK",
+          true);
+    }
+
+    OffsetDateTime now(ResultSet rs) throws SQLException {
+      return dbClock ? rs.getObject("db_now", OffsetDateTime.class) : OffsetDateTime.now();
+    }
+  }
+
+  private AgeQueries ageQueries(Connection conn) throws SQLException {
+    AgeQueries queries = ageQueries.get();
+    if (queries == null) {
+      Dialect dialect = configuredDialect != null
+          ? configuredDialect
+          : DialectDetector.fromConnection(conn).orElse(null);
+      if (dialect == null) {
+        log.warn("Unrecognised database '{}': the age of a lock is judged by this JVM's clock, so "
+                + "clock skew or a time-zone mismatch with the server can make a live lock look "
+                + "stale. Set opentmf.db-lock.dialect if the database is a supported one.",
+            conn.getMetaData().getDatabaseProductName());
+      }
+      queries = AgeQueries.forDialect(dialect);
+      ageQueries.compareAndSet(null, queries);
+    }
+    return queries;
+  }
 
   @Override
   public AcquiredLock acquireLock(LockType lockType, String lockVersion) throws DbLockException {
@@ -215,10 +264,10 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
     }
     long holdTimeout = lockHelper.getLockHoldTimeout(lockType);
     OffsetDateTime expiresAt = existing.createdOn().plus(holdTimeout, ChronoUnit.MILLIS);
-    if (!expiresAt.isBefore(OffsetDateTime.now())) {
+    if (!expiresAt.isBefore(existing.now())) {
       return false;
     }
-    long staleSecs = ChronoUnit.SECONDS.between(expiresAt, OffsetDateTime.now());
+    long staleSecs = ChronoUnit.SECONDS.between(expiresAt, existing.now());
     log.warn("Reclaiming stale lock before acquiring {}: id={}, version={}, hostname={}, "
             + "created_on={} (expired {}s ago, holdTimeout={}ms)",
         lockType, existing.id(), existing.lockVersion(), existing.hostname(),
@@ -277,7 +326,8 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
   }
 
   private ExistingLock fetchExistingLock(Connection conn, LockType lockType) throws SQLException {
-    try (PreparedStatement ps = conn.prepareStatement(SQL_SELECT_LOCK_BY_TYPE)) {
+    AgeQueries queries = ageQueries(conn);
+    try (PreparedStatement ps = conn.prepareStatement(queries.selectLockByType())) {
       ps.setString(1, lockType.getDbValue());
       try (ResultSet rs = ps.executeQuery()) {
         if (!rs.next()) {
@@ -288,13 +338,15 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
             lockType.getDbValue(),
             rs.getString("lock_version"),
             rs.getString("hostname"),
-            rs.getObject("created_on", OffsetDateTime.class));
+            rs.getObject("created_on", OffsetDateTime.class),
+            queries.now(rs));
       }
     }
   }
 
-  private record ExistingLock(
-      int id, String lockType, String lockVersion, String hostname, OffsetDateTime createdOn) {
+  /** A lock row as read, with the time it was read at by the clock that judges its age. */
+  private record ExistingLock(int id, String lockType, String lockVersion, String hostname,
+      OffsetDateTime createdOn, OffsetDateTime now) {
   }
 
   /**
@@ -433,7 +485,7 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
   public void removeStaleLocks() {
     List<ExistingLock> locks;
     try {
-      locks = JdbcHelper.inTransaction(jdbcTemplate, DbLockServiceImpl::fetchAllLocks);
+      locks = JdbcHelper.inTransaction(jdbcTemplate, this::fetchAllLocks);
     } catch (SQLException e) {
       log.warn("Failed to clean up stale locks on startup", e);
       return;
@@ -447,8 +499,8 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
       }
       long holdTimeout = lockHelper.getLockHoldTimeout(lockType);
       OffsetDateTime expiresAt = existing.createdOn().plus(holdTimeout, ChronoUnit.MILLIS);
-      if (expiresAt.isBefore(OffsetDateTime.now())) {
-        long staleSecs = ChronoUnit.SECONDS.between(expiresAt, OffsetDateTime.now());
+      if (expiresAt.isBefore(existing.now())) {
+        long staleSecs = ChronoUnit.SECONDS.between(expiresAt, existing.now());
         log.warn("Removing stale lock: id={}, type={}, version={}, hostname={}, "
                 + "created_on={} (expired {}s ago, holdTimeout={}ms)",
             existing.id(), lockType, existing.lockVersion(), existing.hostname(),
@@ -465,9 +517,10 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
     }
   }
 
-  private static List<ExistingLock> fetchAllLocks(Connection conn) throws SQLException {
+  private List<ExistingLock> fetchAllLocks(Connection conn) throws SQLException {
+    AgeQueries queries = ageQueries(conn);
     List<ExistingLock> locks = new ArrayList<>();
-    try (PreparedStatement ps = conn.prepareStatement(SQL_SELECT_ALL_LOCKS);
+    try (PreparedStatement ps = conn.prepareStatement(queries.selectAllLocks());
          ResultSet rs = ps.executeQuery()) {
       while (rs.next()) {
         locks.add(new ExistingLock(
@@ -475,7 +528,8 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
             rs.getString("lock_type").trim(),
             rs.getString("lock_version"),
             rs.getString("hostname"),
-            rs.getObject("created_on", OffsetDateTime.class)));
+            rs.getObject("created_on", OffsetDateTime.class),
+            queries.now(rs)));
       }
     }
     return locks;

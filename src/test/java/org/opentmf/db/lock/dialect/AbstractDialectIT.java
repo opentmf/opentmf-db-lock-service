@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.zaxxer.hikari.HikariConfig;
@@ -18,6 +19,7 @@ import java.util.concurrent.TimeUnit;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
 import org.opentmf.db.lock.config.DbLockProperties;
+import org.opentmf.db.lock.exception.DbLockTimeoutException;
 import org.opentmf.db.lock.model.AcquiredLock;
 import org.opentmf.db.lock.model.LockType;
 import org.opentmf.db.lock.service.impl.DbLockServiceImpl;
@@ -171,6 +173,68 @@ abstract class AbstractDialectIT {
       waiterPod.destroy();
       jdbcTemplate.update("delete from DB_LOCK_LATEST where lock_type = 'Z'");
       jdbcTemplate.update("delete from DB_LOCK_HISTORY where lock_type = 'Z'");
+    }
+  }
+
+  /** A lock held past the waiter's hold-timeout is reclaimed, on every dialect. */
+  @Test
+  void aLockHeldPastItsHoldTimeoutIsReclaimed() throws Exception {
+    JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource());
+    JdbcHelper.createTables(jdbcTemplate, dialect());
+    DbLockServiceImpl holderPod = new DbLockServiceImpl(jdbcTemplate, testProperties());
+    DbLockProperties waiterProps = testProperties();
+    waiterProps.setLockHoldTimeout(1000L);
+    waiterProps.setLockAcquireTimeout(5000L);
+    DbLockServiceImpl waiterPod = new DbLockServiceImpl(jdbcTemplate, waiterProps);
+    try {
+      AcquiredLock stale = holderPod.acquireLock(LockType.BPMN, "1.0");
+      await().pollDelay(Duration.ofMillis(1500)).until(() -> true);
+
+      AcquiredLock reclaimed = waiterPod.acquireLock(LockType.BPMN, "1.0");
+      waiterPod.releaseLock(reclaimed, false);
+
+      assertEquals(1, jdbcTemplate.queryForObject(
+          "select count(*) from DB_LOCK_HISTORY where lock_id = ?", Integer.class,
+          stale.getLockId()));
+    } finally {
+      holderPod.destroy();
+      waiterPod.destroy();
+      jdbcTemplate.update("delete from DB_LOCK_HISTORY where lock_type = 'B'");
+    }
+  }
+
+  @Test
+  void aLockWithinItsHoldTimeoutIsNotReclaimed() throws Exception {
+    assertALockWithinItsHoldTimeoutIsNotReclaimed(dataSource());
+  }
+
+  /**
+   * A lock still within its hold-timeout is not reclaimed, neither by a waiter nor by the startup
+   * sweep. The age of a lock has to be measured with the database's own clock: up to 2.2.2 it was
+   * {@code created_on}, stamped by the database, against the JVM's clock, so with a plain
+   * {@code TIMESTAMP} column (MySQL, DB2) read under a time zone other than the server's, a lock
+   * one second old looked hours old and was taken from its live holder.
+   */
+  protected void assertALockWithinItsHoldTimeoutIsNotReclaimed(DataSource dataSource)
+      throws Exception {
+    JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource);
+    JdbcHelper.createTables(jdbcTemplate, dialect());
+    DbLockServiceImpl holderPod = new DbLockServiceImpl(jdbcTemplate, testProperties());
+    DbLockServiceImpl waiterPod = new DbLockServiceImpl(jdbcTemplate, testProperties());
+    try {
+      AcquiredLock held = holderPod.acquireLock(LockType.BPMN, "1.0");
+
+      assertThrows(DbLockTimeoutException.class,
+          () -> waiterPod.acquireLock(LockType.BPMN, "1.0"));
+      waiterPod.removeStaleLocks();
+
+      assertTrue(holderPod.hasLock(LockType.BPMN), "the live holder must keep its lock");
+      holderPod.releaseLock(held, false);
+    } finally {
+      holderPod.destroy();
+      waiterPod.destroy();
+      jdbcTemplate.update("delete from DB_LOCK where lock_type = 'B'");
+      jdbcTemplate.update("delete from DB_LOCK_HISTORY where lock_type = 'B'");
     }
   }
 

@@ -41,6 +41,15 @@ public final class DialectDetector {
     }
   }
 
+  /**
+   * Maps the product name reported by an already open connection to a {@link Dialect}, or answers
+   * empty when it is not one of the supported dialects. Unlike {@link #detect(DataSource)} it
+   * neither borrows a connection of its own nor fails on an unknown product.
+   */
+  public static Optional<Dialect> fromConnection(Connection conn) throws SQLException {
+    return mapProductName(conn.getMetaData().getDatabaseProductName());
+  }
+
   static Optional<Dialect> mapProductName(String product) {
     if (product == null) {
       return Optional.empty();
