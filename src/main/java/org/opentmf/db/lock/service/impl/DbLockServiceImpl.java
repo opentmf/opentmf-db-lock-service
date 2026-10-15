@@ -22,9 +22,10 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.Timer;
-import java.util.TimerTask;
-import lombok.RequiredArgsConstructor;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.DisposableBean;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -43,7 +44,10 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
     lockHelper = new DurationHelper(dbLockProperties);
   }
 
-  private final Map<AcquiredLock, Timer> timerMap = new ConcurrentHashMap<>();
+  /** The armed hold-timeout of every lock this instance holds. */
+  private final Map<AcquiredLock, ScheduledFuture<?>> holdTimeouts = new ConcurrentHashMap<>();
+
+  private final ScheduledThreadPoolExecutor holdTimeoutScheduler = newHoldTimeoutScheduler();
 
   private static final String SQL_LOCK_COUNT = "select count(*) from DB_LOCK where lock_type = ?";
 
@@ -96,7 +100,7 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
     while (true) {
       AcquiredLock acquiredLock = tryToLock(lockType, lockVersion);
       if (acquiredLock != null) {
-        createLockReleaseTimer(acquiredLock);
+        armHoldTimeout(acquiredLock);
         log.debug("Acquired lock id = {} for lockType = {}, and lockVersion = {}.",
             acquiredLock.getLockId(), lockType, lockVersion);
         return acquiredLock;
@@ -147,7 +151,7 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
       log.warn("Failed to release lock id={}, type={}", lock.getLockId(), lock.getLockType(), e);
       throw new DbLockException("Couldn't release lock", e);
     }
-    cancelAndRemoveLockReleaseTimer(lock);
+    cancelHoldTimeout(lock);
   }
 
   @Override
@@ -293,20 +297,67 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
       int id, String lockType, String lockVersion, String hostname, OffsetDateTime createdOn) {
   }
 
-  private void createLockReleaseTimer(AcquiredLock acquiredLock) {
-    Timer timer = new Timer();
-    timer.schedule(new DbLockCancelTimer(acquiredLock),
-        lockHelper.getLockHoldTimeout(acquiredLock.getLockType()));
-    timerMap.put(acquiredLock, timer);
+  /**
+   * One daemon thread per service instance runs every hold-timeout. It is started up front, so
+   * arming a hold-timeout never has to create a thread, and it neither keeps the JVM alive nor
+   * outlives {@link #destroy()}, which cancels whatever is still pending.
+   */
+  private static ScheduledThreadPoolExecutor newHoldTimeoutScheduler() {
+    ScheduledThreadPoolExecutor scheduler = new ScheduledThreadPoolExecutor(1, task -> {
+      Thread thread = new Thread(task, "db-lock-hold-timeout");
+      thread.setDaemon(true);
+      return thread;
+    });
+    scheduler.setRemoveOnCancelPolicy(true);
+    scheduler.setExecuteExistingDelayedTasksAfterShutdownPolicy(false);
+    scheduler.prestartCoreThread();
+    return scheduler;
   }
 
-  private synchronized void cancelAndRemoveLockReleaseTimer(AcquiredLock acquiredLock) {
-    Timer timer = timerMap.get(acquiredLock);
-    if (timer != null) {
+  /**
+   * Arms the hold-timeout of a lock just committed. After {@link #destroy()} it can no longer be
+   * armed, and a lock without one could only ever be freed by another instance's stale reclaim, so
+   * the lock is given back at once and the acquire fails.
+   */
+  private void armHoldTimeout(AcquiredLock acquiredLock) throws DbLockException {
+    try {
+      holdTimeouts.put(acquiredLock, holdTimeoutScheduler.schedule(
+          () -> releaseOnHoldTimeout(acquiredLock),
+          lockHelper.getLockHoldTimeout(acquiredLock.getLockType()), TimeUnit.MILLISECONDS));
+    } catch (RejectedExecutionException e) {
+      try {
+        releaseLock(acquiredLock, false);
+      } catch (DbLockException releaseFailure) {
+        e.addSuppressed(releaseFailure);
+      }
+      throw new DbLockException("The lock service has been shut down; the "
+          + acquiredLock.getLockType() + " lock just taken was given back.", e);
+    }
+  }
+
+  private void releaseOnHoldTimeout(AcquiredLock acquiredLock) {
+    log.warn(
+        "Releasing lock {}-{} because of timeout: {}",
+        acquiredLock.getLockType(),
+        acquiredLock.getLockId(),
+        lockHelper.getLockHoldTimeout(acquiredLock.getLockType()));
+    try {
+      releaseLock(acquiredLock, false);
+    } catch (DbLockException e) {
+      log.warn("Ignoring exception during timer-based release of the lock record {}--{}.",
+          acquiredLock.getLockType(), acquiredLock.getLockId(), e);
+    } finally {
+      // Spent either way: past its hold-timeout the row is any instance's to reclaim as stale.
+      holdTimeouts.remove(acquiredLock);
+    }
+  }
+
+  private void cancelHoldTimeout(AcquiredLock acquiredLock) {
+    ScheduledFuture<?> holdTimeout = holdTimeouts.remove(acquiredLock);
+    if (holdTimeout != null) {
       log.trace("Cancelling auto lock release timer for lock id = {}, type = {}",
           acquiredLock.getLockId(), acquiredLock.getLockType());
-      timer.cancel();
-      timerMap.remove(acquiredLock);
+      holdTimeout.cancel(false);
     }
   }
 
@@ -363,13 +414,13 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
   @Override
   public void destroy() {
     log.info("Destroying DbLockService");
-    var locks = new ArrayList<>(timerMap.keySet());
-    for (var acquiredLock : locks) {
+    holdTimeoutScheduler.shutdown();
+    for (AcquiredLock acquiredLock : new ArrayList<>(holdTimeouts.keySet())) {
       log.warn("Releasing still active {}", acquiredLock);
       try {
         releaseLock(acquiredLock, false);
-      } catch (DbLockException e) {
-        log.warn("Ignoring DbLockException while trying to release {}", acquiredLock, e);
+      } catch (DbLockException | RuntimeException e) {
+        log.warn("Ignoring exception while trying to release {}", acquiredLock, e);
       }
     }
   }
@@ -428,26 +479,5 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
       }
     }
     return locks;
-  }
-
-  @RequiredArgsConstructor
-  private class DbLockCancelTimer extends TimerTask {
-
-    private final AcquiredLock acquiredLock;
-
-    @Override
-    public void run() {
-      log.warn(
-          "Releasing lock {}-{} because of timeout: {}",
-          acquiredLock.getLockType(),
-          acquiredLock.getLockId(),
-          lockHelper.getLockHoldTimeout(acquiredLock.getLockType()));
-      try {
-        releaseLock(acquiredLock, false);
-      } catch (DbLockException e) {
-        log.warn("Ignoring exception during timer-based release of the lock record {}--{}.",
-            acquiredLock.getLockType(), acquiredLock.getLockId(), e);
-      }
-    }
   }
 }

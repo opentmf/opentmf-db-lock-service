@@ -1,5 +1,7 @@
 package org.opentmf.db.lock.service.impl;
 
+import static org.awaitility.Awaitility.await;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -17,7 +19,10 @@ import java.sql.DatabaseMetaData;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.time.Duration;
 import java.time.OffsetDateTime;
+import java.util.List;
+import java.util.Set;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
 import org.mockito.InOrder;
@@ -158,6 +163,90 @@ class DbLockServiceImplTest {
     order.verify(delete).executeUpdate();
     order.verify(conn).rollback();
     order.verify(insert).executeUpdate();
+  }
+
+  /**
+   * Holding a lock must not cost a thread that keeps the JVM alive. Each lock used to start its own
+   * non-daemon {@code java.util.Timer} thread for its hold-timeout.
+   */
+  @Test
+  void holdTimeouts_startNoNonDaemonThreadPerLock() throws Exception {
+    Connection conn = acquiringConnection();
+    DbLockServiceImpl service = new DbLockServiceImpl(jdbcTemplateFor(conn), properties());
+    Set<Thread> before = Thread.getAllStackTraces().keySet();
+
+    service.acquireLock(LockType.LOCK_X, "1");
+    service.acquireLock(LockType.LOCK_Y, "1");
+
+    List<String> nonDaemon = Thread.getAllStackTraces().keySet().stream()
+        .filter(t -> !before.contains(t) && !t.isDaemon())
+        .map(Thread::getName)
+        .toList();
+    service.destroy();
+    assertEquals(List.of(), nonDaemon);
+  }
+
+  /**
+   * A hold-timeout runs once. When its release fails, the lock must not stay registered: past its
+   * hold-timeout the row is any instance's to reclaim as stale, and the entry used to linger —
+   * with its timer thread — for {@code destroy()} to try again.
+   */
+  @Test
+  void aHoldTimeoutWhoseReleaseFails_isNotLeftBehind() throws Exception {
+    Connection conn = acquiringConnection();
+    PreparedStatement history = mock(PreparedStatement.class);
+    when(conn.prepareStatement(startsWith("insert into DB_LOCK_HISTORY"))).thenReturn(history);
+    when(history.executeUpdate()).thenThrow(new SQLException("database is down"));
+    DbLockProperties props = properties();
+    props.setLockHoldTimeout(200L);
+    DbLockServiceImpl service = new DbLockServiceImpl(jdbcTemplateFor(conn), props);
+
+    service.acquireLock(LockType.LOCK_X, "1");
+    await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> verify(history).executeUpdate());
+    await().pollDelay(Duration.ofMillis(300)).until(() -> true);
+    service.destroy();
+
+    verify(history, times(1)).executeUpdate();
+  }
+
+  /**
+   * After {@code destroy()} no hold-timeout can be armed any more, so a lock taken then could only
+   * ever be freed by another instance's stale reclaim. It has to be given back at once instead.
+   */
+  @Test
+  void acquireLock_afterDestroy_givesTheLockBackAndFails() throws Exception {
+    Connection conn = acquiringConnection();
+    PreparedStatement history = mock(PreparedStatement.class);
+    when(conn.prepareStatement(startsWith("insert into DB_LOCK_HISTORY"))).thenReturn(history);
+    PreparedStatement delete = mock(PreparedStatement.class);
+    when(conn.prepareStatement(startsWith("delete from DB_LOCK"))).thenReturn(delete);
+    when(delete.executeUpdate()).thenReturn(1);
+    DbLockServiceImpl service = new DbLockServiceImpl(jdbcTemplateFor(conn), properties());
+
+    service.destroy();
+
+    assertThrows(DbLockException.class, () -> service.acquireLock(LockType.LOCK_X, "1"));
+    verify(delete).executeUpdate();
+  }
+
+  /** A connection on which an acquire succeeds (lock id 7, nothing recorded yet), and a release. */
+  private static Connection acquiringConnection() throws SQLException {
+    Connection conn = connection(Connection.TRANSACTION_READ_COMMITTED);
+    PreparedStatement insert = mock(PreparedStatement.class);
+    when(conn.prepareStatement(anyString(), any(String[].class))).thenReturn(insert);
+    when(insert.executeUpdate()).thenReturn(1);
+    ResultSet generatedKey = mock(ResultSet.class);
+    when(generatedKey.next()).thenReturn(true);
+    when(generatedKey.getInt(1)).thenReturn(7);
+    when(insert.getGeneratedKeys()).thenReturn(generatedKey);
+    PreparedStatement latest = mock(PreparedStatement.class);
+    when(conn.prepareStatement(startsWith("select lock_version"))).thenReturn(latest);
+    when(latest.executeQuery()).thenReturn(mock(ResultSet.class));
+    PreparedStatement release = mock(PreparedStatement.class);
+    when(release.executeUpdate()).thenReturn(1);
+    when(conn.prepareStatement(startsWith("insert into DB_LOCK_HISTORY"))).thenReturn(release);
+    when(conn.prepareStatement(startsWith("delete from DB_LOCK"))).thenReturn(release);
+    return conn;
   }
 
   /** A pooled connection as handed out with auto-commit on and the given isolation level. */
