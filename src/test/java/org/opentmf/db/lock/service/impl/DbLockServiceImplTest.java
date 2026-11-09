@@ -23,12 +23,16 @@ import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
 import org.mockito.InOrder;
 import org.opentmf.db.lock.config.DbLockProperties;
 import org.opentmf.db.lock.exception.DbLockException;
+import org.opentmf.db.lock.exception.DbLockLostException;
 import org.opentmf.db.lock.exception.DbLockTimeoutException;
+import org.opentmf.db.lock.model.AcquiredLock;
 import org.opentmf.db.lock.model.LockType;
 import org.springframework.jdbc.core.JdbcTemplate;
 
@@ -145,6 +149,12 @@ class DbLockServiceImplTest {
     when(staleRow.getInt("id")).thenReturn(5);
     when(staleRow.getObject("created_on", OffsetDateTime.class))
         .thenReturn(OffsetDateTime.now().minusHours(1));
+    when(staleRow.getString("lock_type")).thenReturn(LockType.LOCK_X.getDbValue());
+    PreparedStatement rowLock = mock(PreparedStatement.class);
+    when(conn.prepareStatement(startsWith("update DB_LOCK set lock_version"))).thenReturn(rowLock);
+    PreparedStatement byId = mock(PreparedStatement.class);
+    when(conn.prepareStatement(startsWith("select id, lock_type"))).thenReturn(byId);
+    when(byId.executeQuery()).thenReturn(staleRow);
     PreparedStatement history = mock(PreparedStatement.class);
     when(conn.prepareStatement(startsWith("insert into DB_LOCK_HISTORY"))).thenReturn(history);
     when(history.executeUpdate()).thenReturn(1);
@@ -227,6 +237,62 @@ class DbLockServiceImplTest {
 
     assertThrows(DbLockException.class, () -> service.acquireLock(LockType.LOCK_X, "1"));
     verify(delete).executeUpdate();
+  }
+
+  /**
+   * A renewal that cannot reach the database leaves the lease as it was, so this instance's
+   * hold-timeout must stay armed: stopping it for good would leave a lock that only another
+   * instance's stale reclaim could ever free.
+   */
+  @Test
+  void renewLock_whenTheDatabaseFails_keepsTheHoldTimeoutArmed() throws Exception {
+    Connection conn = acquiringConnection();
+    PreparedStatement rowLock = mock(PreparedStatement.class);
+    when(conn.prepareStatement(startsWith("update DB_LOCK set lock_version"))).thenReturn(rowLock);
+    when(rowLock.executeUpdate()).thenThrow(new SQLException("database is down"));
+    DbLockProperties props = properties();
+    props.setLockHoldTimeout(500L);
+    DbLockServiceImpl service = new DbLockServiceImpl(jdbcTemplateFor(conn), props);
+    try {
+      AcquiredLock lock = service.acquireLock(LockType.LOCK_X, "1");
+
+      DbLockException e = assertThrows(DbLockException.class, () -> service.renewLock(lock));
+      assertFalse(e instanceof DbLockLostException, "the lease is unchanged, not lost");
+      await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+          verify(conn).prepareStatement(startsWith("insert into DB_LOCK_HISTORY")));
+    } finally {
+      service.destroy();
+    }
+  }
+
+  /**
+   * A renewal that arrives while the hold-timeout is releasing the lock must fail: the release is
+   * already under way and will delete the row, renewed or not.
+   */
+  @Test
+  void renewLock_whileItsHoldTimeoutIsReleasingIt_failsAsLost() throws Exception {
+    Connection conn = acquiringConnection();
+    CountDownLatch releasing = new CountDownLatch(1);
+    CountDownLatch proceed = new CountDownLatch(1);
+    PreparedStatement history = mock(PreparedStatement.class);
+    when(conn.prepareStatement(startsWith("insert into DB_LOCK_HISTORY"))).thenReturn(history);
+    when(history.executeUpdate()).thenAnswer(invocation -> {
+      releasing.countDown();
+      proceed.await(5, TimeUnit.SECONDS);
+      return 1;
+    });
+    DbLockProperties props = properties();
+    props.setLockHoldTimeout(200L);
+    DbLockServiceImpl service = new DbLockServiceImpl(jdbcTemplateFor(conn), props);
+    try {
+      AcquiredLock lock = service.acquireLock(LockType.LOCK_X, "1");
+      assertTrue(releasing.await(5, TimeUnit.SECONDS));
+
+      assertThrows(DbLockLostException.class, () -> service.renewLock(lock));
+    } finally {
+      proceed.countDown();
+      service.destroy();
+    }
   }
 
   /** A connection on which an acquire succeeds (lock id 7, nothing recorded yet), and a release. */

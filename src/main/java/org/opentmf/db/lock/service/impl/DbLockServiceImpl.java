@@ -5,6 +5,7 @@ import org.opentmf.db.lock.config.DbLockProperties;
 import org.opentmf.db.lock.dialect.Dialect;
 import org.opentmf.db.lock.dialect.DialectDetector;
 import org.opentmf.db.lock.exception.DbLockException;
+import org.opentmf.db.lock.exception.DbLockLostException;
 import org.opentmf.db.lock.exception.DbLockTimeoutException;
 import org.opentmf.db.lock.model.AcquiredLock;
 import org.opentmf.db.lock.model.LatestLock;
@@ -53,7 +54,7 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
   }
 
   /** The armed hold-timeout of every lock this instance holds. */
-  private final Map<AcquiredLock, ScheduledFuture<?>> holdTimeouts = new ConcurrentHashMap<>();
+  private final Map<AcquiredLock, HoldTimeout> holdTimeouts = new ConcurrentHashMap<>();
 
   private final ScheduledThreadPoolExecutor holdTimeoutScheduler = newHoldTimeoutScheduler();
 
@@ -85,6 +86,16 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
   private static final String SQL_DELETE_LOCK =
       "delete from DB_LOCK where id = ? and lock_type = ?";
 
+  /**
+   * Changes nothing; it takes the lock row's write lock, held until the transaction ends. A renewal
+   * and a stale-lock removal of the same row each start with it and then re-read the row, so the
+   * second of them waits for the first and decides on what the first committed: a removal that
+   * meets a renewal in flight sees the renewed lease, and a renewal that comes after a removal
+   * finds no row.
+   */
+  private static final String SQL_LOCK_ROW =
+      "update DB_LOCK set lock_version = lock_version where id = ?";
+
   private static final String SQL_INSERT_HISTORY =
       "insert into DB_LOCK_HISTORY (lock_id, lock_type, lock_version, hostname, lock_acquired_on) "
           + "select id, lock_type, lock_version, hostname, created_on "
@@ -98,14 +109,16 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
    * know they return no {@code db_now} and the JVM's clock stands in, as before.
    */
   private record AgeQueries(String selectLockByType, String selectAllLocks,
-      String selectLatestLock, boolean dbClock) {
+      String selectLockById, String selectLatestLock, String renewLock, boolean dbClock) {
 
     static AgeQueries forDialect(Dialect dialect) {
       if (dialect == null) {
         return new AgeQueries(
             "select id, lock_version, hostname, created_on from DB_LOCK where lock_type = ?",
             "select id, lock_type, lock_version, hostname, created_on from DB_LOCK",
+            "select id, lock_type, lock_version, hostname, created_on from DB_LOCK where id = ?",
             "select lock_version, lock_acquired_on from DB_LOCK_LATEST where lock_type = ?",
+            renewLockSql("CURRENT_TIMESTAMP"),
             false);
       }
       String now = dialect.getCurrentTimestampSql();
@@ -114,9 +127,21 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
               + " as db_now from DB_LOCK where lock_type = ?",
           "select id, lock_type, lock_version, hostname, created_on, " + now
               + " as db_now from DB_LOCK",
+          "select id, lock_type, lock_version, hostname, created_on, " + now
+              + " as db_now from DB_LOCK where id = ?",
           "select lock_version, lock_acquired_on, " + now
               + " as db_now from DB_LOCK_LATEST where lock_type = ?",
+          renewLockSql(now),
           true);
+    }
+
+    /**
+     * Restarts the lease: the lock's age is measured from {@code created_on}, by every version of
+     * the library, so an instance still on an older release honours a renewal too. The time is
+     * the database's, the same clock as the column's default.
+     */
+    private static String renewLockSql(String now) {
+      return "update DB_LOCK set created_on = " + now + " where id = ?";
     }
 
     OffsetDateTime now(ResultSet rs) throws SQLException {
@@ -209,6 +234,68 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
     cancelHoldTimeout(lock);
   }
 
+  /** What a renewal found in the database. */
+  private enum RenewOutcome { RENEWED, EXPIRED, GONE }
+
+  /**
+   * Renews in three steps. This instance's hold-timeout is claimed and stopped first, so it cannot
+   * release the lock behind a renewal that succeeds; a hold-timeout that has already claimed the
+   * lock is releasing it, and the renewal fails without touching the database. The database
+   * renewal follows as one transaction, and the hold-timeout is re-armed for the full period only
+   * once that has committed. When the database cannot be reached the hold-timeout is put back with
+   * the time it had left, since the lease in the database is then unchanged.
+   */
+  @Override
+  public void renewLock(AcquiredLock lock) throws DbLockException {
+    LockType lockType = lock.getLockType();
+    long holdTimeout = lockHelper.getLockHoldTimeout(lockType);
+    HoldTimeout armed = holdTimeouts.remove(lock);
+    if (armed == null) {
+      throw new DbLockLostException(String.format("Cannot renew lock id=%d, type=%s: this "
+          + "instance does not hold it — it was released, its lock-hold-timeout (%d ms) ran out, "
+          + "or it was acquired by another instance.", lock.getLockId(), lockType, holdTimeout));
+    }
+    long remaining = armed.cancel();
+    RenewOutcome outcome;
+    try {
+      outcome = JdbcHelper.inTransaction(jdbcTemplate, conn -> renew(conn, lock));
+    } catch (SQLException e) {
+      armHoldTimeout(lock, remaining);
+      throw new DbLockException("Couldn't renew lock id=" + lock.getLockId() + ", type="
+          + lockType, e);
+    }
+    switch (outcome) {
+      case RENEWED -> {
+        armHoldTimeout(lock, holdTimeout);
+        log.debug("Renewed lock id = {}, type = {} for another {} ms.", lock.getLockId(),
+            lockType, holdTimeout);
+      }
+      case EXPIRED -> throw new DbLockLostException(String.format("Cannot renew lock id=%d, "
+          + "type=%s: its lease of %d ms had already expired, so it was released instead.",
+          lock.getLockId(), lockType, holdTimeout));
+      case GONE -> throw new DbLockLostException(String.format("Cannot renew lock id=%d, type=%s: "
+          + "it is no longer held — released, or reclaimed as stale by another instance.",
+          lock.getLockId(), lockType));
+    }
+  }
+
+  private RenewOutcome renew(Connection conn, AcquiredLock lock) throws SQLException {
+    LockType lockType = lock.getLockType();
+    ExistingLock current = lockAndRead(conn, lock.getLockId(), lockType);
+    if (current == null) {
+      return RenewOutcome.GONE;
+    }
+    if (isExpired(current, lockType)) {
+      log.warn("Lock id={}, type={} was renewed after its lease had expired ({}s ago, "
+              + "holdTimeout={}ms); releasing it.", current.id(), lockType,
+          secondsExpired(current, lockType), lockHelper.getLockHoldTimeout(lockType));
+      moveToHistory(conn, current.id(), lockType.getDbValue());
+      return RenewOutcome.EXPIRED;
+    }
+    JdbcHelper.executeUpdate(conn, ageQueries(conn).renewLock(), current.id());
+    return RenewOutcome.RENEWED;
+  }
+
   @Override
   public boolean hasLock(LockType lockType) {
     try {
@@ -265,20 +352,61 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
 
   private boolean reclaimIfStale(Connection conn, LockType lockType) throws SQLException {
     ExistingLock existing = fetchExistingLock(conn, lockType);
-    if (existing == null) {
+    if (existing == null || !isExpired(existing, lockType)) {
       return false;
     }
-    long holdTimeout = lockHelper.getLockHoldTimeout(lockType);
-    OffsetDateTime expiresAt = existing.createdOn().plus(holdTimeout, ChronoUnit.MILLIS);
-    if (!expiresAt.isBefore(existing.now())) {
+    return removeIfStillStale(conn, existing.id(), lockType, "Reclaiming stale lock");
+  }
+
+  /**
+   * Removes a lock read as stale, after taking its row lock and reading it again: its holder may
+   * have renewed it since it was read, and then it is not stale any more and stays.
+   *
+   * @return whether this call removed the lock row
+   */
+  private boolean removeIfStillStale(Connection conn, int lockId, LockType lockType,
+      String action) throws SQLException {
+    ExistingLock current = lockAndRead(conn, lockId, lockType);
+    if (current == null || !isExpired(current, lockType)) {
       return false;
     }
-    long staleSecs = ChronoUnit.SECONDS.between(expiresAt, existing.now());
-    log.warn("Reclaiming stale lock before acquiring {}: id={}, version={}, hostname={}, "
-            + "created_on={} (expired {}s ago, holdTimeout={}ms)",
-        lockType, existing.id(), existing.lockVersion(), existing.hostname(),
-        existing.createdOn(), staleSecs, holdTimeout);
-    return moveToHistory(conn, existing.id(), lockType.getDbValue());
+    log.warn("{}: id={}, type={}, version={}, hostname={}, created_on={} (expired {}s ago, "
+            + "holdTimeout={}ms)", action, current.id(), lockType, current.lockVersion(),
+        current.hostname(), current.createdOn(), secondsExpired(current, lockType),
+        lockHelper.getLockHoldTimeout(lockType));
+    return moveToHistory(conn, lockId, lockType.getDbValue());
+  }
+
+  /**
+   * Takes the row lock of the lock {@code lockId} (see {@link #SQL_LOCK_ROW}) and reads it as it
+   * now stands, or {@code null} when it is gone.
+   */
+  private ExistingLock lockAndRead(Connection conn, int lockId, LockType lockType)
+      throws SQLException {
+    JdbcHelper.executeUpdate(conn, SQL_LOCK_ROW, lockId);
+    AgeQueries queries = ageQueries(conn);
+    try (PreparedStatement ps = conn.prepareStatement(queries.selectLockById())) {
+      ps.setInt(1, lockId);
+      try (ResultSet rs = ps.executeQuery()) {
+        if (!rs.next()) {
+          return null;
+        }
+        ExistingLock current = readLock(rs, rs.getString("lock_type").trim(), queries);
+        return current.lockType().equals(lockType.getDbValue()) ? current : null;
+      }
+    }
+  }
+
+  private OffsetDateTime expiresAt(ExistingLock lock, LockType lockType) {
+    return lock.createdOn().plus(lockHelper.getLockHoldTimeout(lockType), ChronoUnit.MILLIS);
+  }
+
+  private boolean isExpired(ExistingLock lock, LockType lockType) {
+    return expiresAt(lock, lockType).isBefore(lock.now());
+  }
+
+  private long secondsExpired(ExistingLock lock, LockType lockType) {
+    return ChronoUnit.SECONDS.between(expiresAt(lock, lockType), lock.now());
   }
 
   /**
@@ -380,18 +508,62 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
    * the lock is given back at once and the acquire fails.
    */
   private void armHoldTimeout(AcquiredLock acquiredLock) throws DbLockException {
+    armHoldTimeout(acquiredLock, lockHelper.getLockHoldTimeout(acquiredLock.getLockType()));
+  }
+
+  private void armHoldTimeout(AcquiredLock acquiredLock, long delayMillis)
+      throws DbLockException {
+    HoldTimeout holdTimeout = new HoldTimeout(acquiredLock);
+    // Registered before it is scheduled, so that even a zero delay finds its own entry to claim.
+    holdTimeouts.put(acquiredLock, holdTimeout);
     try {
-      holdTimeouts.put(acquiredLock, holdTimeoutScheduler.schedule(
-          () -> releaseOnHoldTimeout(acquiredLock),
-          lockHelper.getLockHoldTimeout(acquiredLock.getLockType()), TimeUnit.MILLISECONDS));
+      holdTimeout.future =
+          holdTimeoutScheduler.schedule(holdTimeout, delayMillis, TimeUnit.MILLISECONDS);
     } catch (RejectedExecutionException e) {
+      holdTimeouts.remove(acquiredLock, holdTimeout);
       try {
         releaseLock(acquiredLock, false);
       } catch (DbLockException releaseFailure) {
         e.addSuppressed(releaseFailure);
       }
       throw new DbLockException("The lock service has been shut down; the "
-          + acquiredLock.getLockType() + " lock just taken was given back.", e);
+          + acquiredLock.getLockType() + " lock was given back.", e);
+    }
+  }
+
+  /**
+   * One armed hold-timeout. Its entry in {@link #holdTimeouts} is the claim on the lock: whoever
+   * removes the entry — the hold-timeout when it fires, or a release or renewal by the holder — owns
+   * what happens next, and the others stand down. Cancelling the future alone cannot decide that,
+   * since a task that has already started still reports itself as cancellable.
+   */
+  private final class HoldTimeout implements Runnable {
+
+    private final AcquiredLock lock;
+    private volatile ScheduledFuture<?> future;
+
+    private HoldTimeout(AcquiredLock lock) {
+      this.lock = lock;
+    }
+
+    @Override
+    public void run() {
+      // Spent once claimed, whatever the release does: past its hold-timeout the row is any
+      // instance's to reclaim as stale.
+      if (holdTimeouts.remove(lock, this)) {
+        releaseOnHoldTimeout(lock);
+      }
+    }
+
+    /** Stops it; the caller has already claimed it by removing its entry. */
+    private long cancel() {
+      ScheduledFuture<?> scheduled = future;
+      if (scheduled == null) {
+        return 0;
+      }
+      long remaining = scheduled.getDelay(TimeUnit.MILLISECONDS);
+      scheduled.cancel(false);
+      return Math.max(0, remaining);
     }
   }
 
@@ -406,18 +578,15 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
     } catch (DbLockException e) {
       log.warn("Ignoring exception during timer-based release of the lock record {}--{}.",
           acquiredLock.getLockType(), acquiredLock.getLockId(), e);
-    } finally {
-      // Spent either way: past its hold-timeout the row is any instance's to reclaim as stale.
-      holdTimeouts.remove(acquiredLock);
     }
   }
 
   private void cancelHoldTimeout(AcquiredLock acquiredLock) {
-    ScheduledFuture<?> holdTimeout = holdTimeouts.remove(acquiredLock);
+    HoldTimeout holdTimeout = holdTimeouts.remove(acquiredLock);
     if (holdTimeout != null) {
       log.trace("Cancelling auto lock release timer for lock id = {}, type = {}",
           acquiredLock.getLockId(), acquiredLock.getLockType());
-      holdTimeout.cancel(false);
+      holdTimeout.cancel();
     }
   }
 
@@ -521,19 +690,13 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
             existing.id(), existing.lockType());
         continue;
       }
-      long holdTimeout = lockHelper.getLockHoldTimeout(lockType);
-      OffsetDateTime expiresAt = existing.createdOn().plus(holdTimeout, ChronoUnit.MILLIS);
-      if (expiresAt.isBefore(existing.now())) {
-        long staleSecs = ChronoUnit.SECONDS.between(expiresAt, existing.now());
-        log.warn("Removing stale lock: id={}, type={}, version={}, hostname={}, "
-                + "created_on={} (expired {}s ago, holdTimeout={}ms)",
-            existing.id(), lockType, existing.lockVersion(), existing.hostname(),
-            existing.createdOn(), staleSecs, holdTimeout);
+      if (isExpired(existing, lockType)) {
         try {
           // Each stale row is moved in its own transaction, so a row another instance removed
-          // in the meantime rolls back only its own history copy.
+          // in the meantime rolls back only its own history copy, and a row its holder renewed in
+          // the meantime is left alone.
           JdbcHelper.inTransaction(jdbcTemplate,
-              conn -> moveToHistory(conn, existing.id(), existing.lockType()));
+              conn -> removeIfStillStale(conn, existing.id(), lockType, "Removing stale lock"));
         } catch (SQLException e) {
           log.warn("Failed to remove stale lock id={} on startup", existing.id(), e);
         }
