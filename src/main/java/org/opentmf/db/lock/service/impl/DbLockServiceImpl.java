@@ -517,8 +517,8 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
     // Registered before it is scheduled, so that even a zero delay finds its own entry to claim.
     holdTimeouts.put(acquiredLock, holdTimeout);
     try {
-      holdTimeout.future =
-          holdTimeoutScheduler.schedule(holdTimeout, delayMillis, TimeUnit.MILLISECONDS);
+      holdTimeout.future.set(
+          holdTimeoutScheduler.schedule(holdTimeout, delayMillis, TimeUnit.MILLISECONDS));
     } catch (RejectedExecutionException e) {
       holdTimeouts.remove(acquiredLock, holdTimeout);
       try {
@@ -540,7 +540,7 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
   private final class HoldTimeout implements Runnable {
 
     private final AcquiredLock lock;
-    private volatile ScheduledFuture<?> future;
+    private final AtomicReference<ScheduledFuture<?>> future = new AtomicReference<>();
 
     private HoldTimeout(AcquiredLock lock) {
       this.lock = lock;
@@ -551,33 +551,30 @@ public class DbLockServiceImpl implements DbLockService, DisposableBean {
       // Spent once claimed, whatever the release does: past its hold-timeout the row is any
       // instance's to reclaim as stale.
       if (holdTimeouts.remove(lock, this)) {
-        releaseOnHoldTimeout(lock);
+        release();
+      }
+    }
+
+    private void release() {
+      log.warn("Releasing lock {}-{} because of timeout: {}", lock.getLockType(), lock.getLockId(),
+          lockHelper.getLockHoldTimeout(lock.getLockType()));
+      try {
+        releaseLock(lock, false);
+      } catch (DbLockException e) {
+        log.warn("Ignoring exception during timer-based release of the lock record {}--{}.",
+            lock.getLockType(), lock.getLockId(), e);
       }
     }
 
     /** Stops it; the caller has already claimed it by removing its entry. */
     private long cancel() {
-      ScheduledFuture<?> scheduled = future;
+      ScheduledFuture<?> scheduled = future.get();
       if (scheduled == null) {
         return 0;
       }
       long remaining = scheduled.getDelay(TimeUnit.MILLISECONDS);
       scheduled.cancel(false);
       return Math.max(0, remaining);
-    }
-  }
-
-  private void releaseOnHoldTimeout(AcquiredLock acquiredLock) {
-    log.warn(
-        "Releasing lock {}-{} because of timeout: {}",
-        acquiredLock.getLockType(),
-        acquiredLock.getLockId(),
-        lockHelper.getLockHoldTimeout(acquiredLock.getLockType()));
-    try {
-      releaseLock(acquiredLock, false);
-    } catch (DbLockException e) {
-      log.warn("Ignoring exception during timer-based release of the lock record {}--{}.",
-          acquiredLock.getLockType(), acquiredLock.getLockId(), e);
     }
   }
 
