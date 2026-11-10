@@ -2,7 +2,7 @@ package org.opentmf.db.lock.dialect;
 
 import javax.sql.DataSource;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
-import org.testcontainers.containers.Db2Container;
+import org.testcontainers.db2.Db2Container;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;

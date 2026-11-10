@@ -4,6 +4,33 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [3.1.0] - 2026-11-09
+
+### Added
+- **`DbLockService.renewLock(AcquiredLock)`** — a heartbeat for long-held
+  locks. It starts the lock's hold-timeout over, measured from now by the
+  database's clock, so a holder can keep a lock for as long as it is alive
+  under a short hold-timeout, and a holder that crashed or hung is replaced
+  one hold-timeout later. Only the instance that acquired the lock can renew
+  it, keyed on the lock's id. A renewal after the lease ran out — the
+  hold-timeout fired, another instance reclaimed the lock, or the database's
+  clock puts it past its hold-timeout — throws the new
+  `DbLockLostException` (a `DbLockException`) and releases a lock that is
+  still in the database; a database failure throws a plain `DbLockException`
+  and leaves the lease and the holder's hold-timeout as they were. A waiter's
+  stale-lock reclaim and the startup sweep now take the lock row's write lock
+  and read the row again before removing it, so a reclaim that meets a
+  renewal in flight leaves the renewed lock alone. A renewal rewrites
+  `DB_LOCK.created_on`; no schema change, and 3.0.x instances honour it. See
+  the README's "Renewing a long-held lock with `renewLock`".
+
+### Changed
+- Spring Boot 4.1.2; jacoco-maven-plugin 0.8.16, maven-surefire-plugin and
+  maven-failsafe-plugin 3.6.1, maven-enforcer-plugin 3.7.0.
+- Testcontainers 2.0.5 (test scope), now resolved from the Spring Boot BOM instead of a
+  `testcontainers.version` pin. Testcontainers 2 renamed its modules (`postgresql` →
+  `testcontainers-postgresql`, and so on), so the 1.x pin was no longer visible as behind.
+
 ## [3.0.0] - 2026-10-15
 
 A review of the library's transaction handling. Nothing here changes how a

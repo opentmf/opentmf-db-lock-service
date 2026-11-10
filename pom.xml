@@ -3,7 +3,7 @@
   <modelVersion>4.0.0</modelVersion>
   <groupId>org.opentmf.util</groupId>
   <artifactId>opentmf-db-lock-service</artifactId>
-  <version>3.0.1-SNAPSHOT</version>
+  <version>3.1.0-SNAPSHOT</version>
   <name>opentmf-db-lock-service</name>
 
   <description>
@@ -40,22 +40,21 @@
     <maven.compiler.source>${java.version}</maven.compiler.source>
     <maven.compiler.target>${java.version}</maven.compiler.target>
 
-    <spring-boot.version>4.1.1</spring-boot.version>
+    <spring-boot.version>4.1.2</spring-boot.version>
     <archunit.version>1.5.1</archunit.version>
-    <testcontainers.version>1.21.4</testcontainers.version>
     <system-stubs-jupiter.version>2.1.8</system-stubs-jupiter.version>
 
-    <jacoco-maven-plugin.version>0.8.15</jacoco-maven-plugin.version>
+    <jacoco-maven-plugin.version>0.8.16</jacoco-maven-plugin.version>
     <sonar-plugin.version>5.8.0.7211</sonar-plugin.version>
-    <maven-surefire-plugin.version>3.6.0</maven-surefire-plugin.version>
-    <maven-failsafe-plugin.version>3.6.0</maven-failsafe-plugin.version>
+    <maven-surefire-plugin.version>3.6.1</maven-surefire-plugin.version>
+    <maven-failsafe-plugin.version>3.6.1</maven-failsafe-plugin.version>
     <maven-source-plugin.version>3.4.0</maven-source-plugin.version>
     <maven-javadoc-plugin.version>3.12.0</maven-javadoc-plugin.version>
     <maven-deploy-plugin.version>3.2.0</maven-deploy-plugin.version>
     <maven-resources-plugin.version>3.5.0</maven-resources-plugin.version>
     <maven-compiler-plugin.version>3.16.0</maven-compiler-plugin.version>
     <maven-release-plugin.version>3.3.1</maven-release-plugin.version>
-    <maven-enforcer-plugin.version>3.6.3</maven-enforcer-plugin.version>
+    <maven-enforcer-plugin.version>3.7.0</maven-enforcer-plugin.version>
     <maven-gpg-plugin.version>3.2.8</maven-gpg-plugin.version>
     <central-publishing-maven-plugin.version>0.12.0</central-publishing-maven-plugin.version>
 
@@ -146,39 +145,33 @@
     </dependency>
     <dependency>
       <groupId>org.testcontainers</groupId>
-      <artifactId>postgresql</artifactId>
+      <artifactId>testcontainers-postgresql</artifactId>
       <scope>test</scope>
-      <version>${testcontainers.version}</version>
     </dependency>
     <dependency>
       <groupId>org.testcontainers</groupId>
-      <artifactId>mysql</artifactId>
+      <artifactId>testcontainers-mysql</artifactId>
       <scope>test</scope>
-      <version>${testcontainers.version}</version>
     </dependency>
     <dependency>
       <groupId>org.testcontainers</groupId>
-      <artifactId>oracle-free</artifactId>
+      <artifactId>testcontainers-oracle-free</artifactId>
       <scope>test</scope>
-      <version>${testcontainers.version}</version>
     </dependency>
     <dependency>
       <groupId>org.testcontainers</groupId>
-      <artifactId>mssqlserver</artifactId>
+      <artifactId>testcontainers-mssqlserver</artifactId>
       <scope>test</scope>
-      <version>${testcontainers.version}</version>
     </dependency>
     <dependency>
       <groupId>org.testcontainers</groupId>
-      <artifactId>db2</artifactId>
+      <artifactId>testcontainers-db2</artifactId>
       <scope>test</scope>
-      <version>${testcontainers.version}</version>
     </dependency>
     <dependency>
       <groupId>org.testcontainers</groupId>
-      <artifactId>junit-jupiter</artifactId>
+      <artifactId>testcontainers-junit-jupiter</artifactId>
       <scope>test</scope>
-      <version>${testcontainers.version}</version>
     </dependency>
     <dependency>
       <groupId>com.tngtech.archunit</groupId>

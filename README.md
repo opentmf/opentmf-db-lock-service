@@ -82,10 +82,45 @@ opentmf:
 
 The hold-timeout does two jobs at once:
 
-1. **The holder's own kill-switch.** When a lock is still held this long after it was acquired, the instance holding it releases it in the background (one daemon thread per service instance runs these).
+1. **The holder's own kill-switch.** When a lock is still held this long after it was acquired (or last renewed, since 3.1.0), the instance holding it releases it in the background (one daemon thread per service instance runs these).
 2. **The staleness threshold for everybody else.** A lock older than the hold-timeout is treated as left behind by a crashed or hung holder: a waiting instance reclaims it on the spot, and the startup sweep removes it. A lock's age is measured with the database's own clock (since 3.0.0).
 
 So it is not a soft limit. Work that runs longer than the hold-timeout **loses the lock while it is still running**, and another instance may then take the lock and start the same work concurrently. When the original holder finally finishes and releases, its lock is already gone: nothing is recorded in `DB_LOCK_LATEST` for that run, and a warning says so. Set the hold-timeout (per lock type if needed) comfortably above the longest legitimate run of the work it guards.
+
+When the longest run cannot be bounded — or when a short hold-timeout is wanted so that a crashed holder is replaced quickly — keep the hold-timeout short and renew the lock while the work runs, as below.
+
+### Renewing a long-held lock with `renewLock` (3.1.0+)
+
+`DbLockService.renewLock(AcquiredLock)` is a heartbeat: it starts the lock's hold-timeout over, measured from now by the database's clock. A holder that renews at regular intervals keeps its lock for as long as it is alive, while a holder that crashes or hangs stops renewing and loses the lock one hold-timeout later.
+
+```java
+AcquiredLock lock = dbLockService.acquireLock(LockType.CATALOG, "git-relay");
+ScheduledFuture<?> heartbeat = scheduler.scheduleAtFixedRate(() -> {
+  try {
+    dbLockService.renewLock(lock);
+  } catch (DbLockLostException e) {
+    // The lock is gone: stop the work it guards, another instance may already be doing it.
+    stopTheWork();
+  } catch (DbLockException e) {
+    // The database could not be reached; the lease is unchanged. Try again on the next beat.
+  }
+}, holdTimeout / 3, holdTimeout / 3, TimeUnit.MILLISECONDS);
+try {
+  doTheWork();
+} finally {
+  heartbeat.cancel(false);
+  dbLockService.releaseLock(lock, false);
+}
+```
+
+The contract:
+
+- **Only the holder renews.** The renewal is keyed on the lock's id, which belongs to one acquisition only, and only the service instance that acquired the lock can renew it. A later lock of the same type is never touched.
+- **A renewed lock is fresh for every instance.** Its age counts from the renewal for a waiter's stale-lock reclaim and for the startup sweep, and the holder's own hold-timeout is re-armed for the full period. A renewal and a reclaim of the same lock never both succeed: each takes the lock row's write lock and then reads the row again, so a reclaim that meets a renewal in flight sees the renewed lease.
+- **A renewal after expiry fails loudly.** When the lease has already run out — the hold-timeout fired, another instance reclaimed the lock, or the database's clock says it is past its hold-timeout — `renewLock` throws `DbLockLostException` (a `DbLockException`). A lock that is expired but still in the database is released on the spot. A database failure throws a plain `DbLockException` and leaves the lease and this instance's hold-timeout as they were.
+- **Renew every third of the hold-timeout.** That leaves room for two missed beats before the lease runs out.
+
+A renewal sets `DB_LOCK.created_on` to the time of the renewal, so the `lock_acquired_on` that `DB_LOCK_HISTORY` and `DB_LOCK_LATEST` later copy from it is the start of the lock's last lease, not of the first acquisition. No schema change is involved, and an instance still on 3.0.x measures a lock's age from `created_on` too, so it also honours a renewal during a rolling upgrade.
 
 ## Supported Databases
 

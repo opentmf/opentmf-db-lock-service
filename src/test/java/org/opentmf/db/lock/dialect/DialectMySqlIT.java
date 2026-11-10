@@ -3,16 +3,16 @@ package org.opentmf.db.lock.dialect;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
-import org.testcontainers.containers.MySQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
+import org.testcontainers.mysql.MySQLContainer;
 
 @Testcontainers
 class DialectMySqlIT extends AbstractDialectIT {
 
   @Container
-  static final MySQLContainer<?> CONTAINER =
-      new MySQLContainer<>("mysql:8.4")
+  static final MySQLContainer CONTAINER =
+      new MySQLContainer("mysql:8.4")
           .withUrlParam("serverTimezone", "UTC");
 
   @Override

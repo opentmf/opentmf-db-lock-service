@@ -30,9 +30,9 @@ import org.springframework.core.io.ByteArrayResource;
 import org.springframework.core.io.Resource;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
-import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
+import org.testcontainers.postgresql.PostgreSQLContainer;
 
 /**
  * PostgreSQL dialect tests: the shared {@link AbstractDialectIT} contract, plus regression guards
@@ -50,8 +50,8 @@ class DialectPostgresIT extends AbstractDialectIT {
   private static final int LEGACY_LENGTH = 10;
 
   @Container
-  static final PostgreSQLContainer<?> CONTAINER =
-      new PostgreSQLContainer<>("postgres:16-alpine");
+  static final PostgreSQLContainer CONTAINER =
+      new PostgreSQLContainer("postgres:16-alpine");
 
   @Override
   protected DataSource dataSource() {

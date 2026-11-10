@@ -4,21 +4,34 @@ import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.Timestamp;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
 import org.opentmf.db.lock.config.DbLockProperties;
+import org.opentmf.db.lock.exception.DbLockException;
+import org.opentmf.db.lock.exception.DbLockLostException;
 import org.opentmf.db.lock.exception.DbLockTimeoutException;
 import org.opentmf.db.lock.model.AcquiredLock;
 import org.opentmf.db.lock.model.LockType;
@@ -269,6 +282,159 @@ abstract class AbstractDialectIT {
       jdbcTemplate.update("delete from DB_LOCK_LATEST where lock_type = 'C'");
       jdbcTemplate.update("delete from DB_LOCK_HISTORY where lock_type = 'C'");
     }
+  }
+
+  /**
+   * Two contenders, one lock. While the holder renews its lease, the waiter cannot take the lock
+   * for two and a half hold-timeouts, and the holder's own hold-timeout does not release it either.
+   * Once the renewals stop, the lease runs out and the waiter takes the lock — and the holder's
+   * next renewal fails loudly instead of taking anything back from the new holder.
+   */
+  @Test
+  void aRenewedLeaseIsNotStolenAndAnUnrenewedOneIs() throws Exception {
+    JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource());
+    JdbcHelper.createTables(jdbcTemplate, dialect());
+    DbLockProperties props = testProperties();
+    props.setLockHoldTimeout(2000L);
+    props.setLockAcquireTimeout(5000L);
+    DbLockServiceImpl holderPod = new DbLockServiceImpl(jdbcTemplate, props);
+    DbLockServiceImpl waiterPod = new DbLockServiceImpl(jdbcTemplate, props);
+    ScheduledExecutorService heartbeat = Executors.newSingleThreadScheduledExecutor();
+    AtomicReference<DbLockException> failedBeat = new AtomicReference<>();
+    try {
+      AcquiredLock held = holderPod.acquireLock(LockType.LOCK_X, "1.0");
+      ScheduledFuture<?> beats = heartbeat.scheduleAtFixedRate(() -> {
+        try {
+          holderPod.renewLock(held);
+        } catch (DbLockException e) {
+          failedBeat.compareAndSet(null, e);
+        }
+      }, 500, 500, TimeUnit.MILLISECONDS);
+
+      assertThrows(DbLockTimeoutException.class,
+          () -> waiterPod.acquireLock(LockType.LOCK_X, "1.0"));
+      assertNull(failedBeat.get(), "every renewal within the lease must succeed");
+      assertEquals(held.getLockId(), heldLockId(jdbcTemplate, LockType.LOCK_X),
+          "the renewed lock must still be the holder's");
+
+      beats.cancel(false);
+      AcquiredLock taken = waiterPod.acquireLock(LockType.LOCK_X, "1.0");
+      assertNotEquals(held.getLockId(), taken.getLockId());
+
+      assertThrows(DbLockLostException.class, () -> holderPod.renewLock(held));
+      assertEquals(taken.getLockId(), heldLockId(jdbcTemplate, LockType.LOCK_X),
+          "a failed renewal must leave the new holder's lock alone");
+      waiterPod.releaseLock(taken, false);
+    } finally {
+      heartbeat.shutdownNow();
+      holderPod.destroy();
+      waiterPod.destroy();
+      jdbcTemplate.update("delete from DB_LOCK where lock_type = 'X'");
+      jdbcTemplate.update("delete from DB_LOCK_HISTORY where lock_type = 'X'");
+    }
+  }
+
+  /**
+   * A waiter that finds the lock stale while its holder is renewing it must not remove the renewed
+   * lock. The reclaim reads the lock without blocking, so it can see the old lease; it then waits
+   * for the renewal's row lock and has to read the lock again before it decides.
+   */
+  @Test
+  void aReclaimThatMeetsARenewalInFlightLeavesTheRenewedLease() throws Exception {
+    JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource());
+    JdbcHelper.createTables(jdbcTemplate, dialect());
+    DbLockServiceImpl holderPod = new DbLockServiceImpl(jdbcTemplate, testProperties());
+    DbLockProperties waiterProps = testProperties();
+    // Long enough that the renewed lease cannot run out again before the waiter gives up, even
+    // where the column keeps whole seconds only (MySQL).
+    waiterProps.setLockHoldTimeout(3000L);
+    waiterProps.setLockAcquireTimeout(1500L);
+    DbLockServiceImpl waiterPod = new DbLockServiceImpl(jdbcTemplate, waiterProps);
+    ExecutorService executor = Executors.newSingleThreadExecutor();
+    try {
+      AcquiredLock held = holderPod.acquireLock(LockType.CATALOG, "1.0");
+      await().pollDelay(Duration.ofMillis(4500)).until(() -> true);
+
+      try (Connection renewal = dataSource().getConnection()) {
+        renewal.setAutoCommit(false);
+        try (PreparedStatement ps = renewal.prepareStatement("update DB_LOCK set created_on = "
+            + dialect().getCurrentTimestampSql() + " where id = ?")) {
+          ps.setInt(1, held.getLockId());
+          assertEquals(1, ps.executeUpdate());
+        }
+        Future<AcquiredLock> waiter =
+            executor.submit(() -> waiterPod.acquireLock(LockType.CATALOG, "1.0"));
+        // The waiter reads the old, stale lease and blocks on the renewal's row lock.
+        await().pollDelay(Duration.ofMillis(500)).until(() -> true);
+        renewal.commit();
+
+        ExecutionException e = assertThrows(ExecutionException.class,
+            () -> waiter.get(10, TimeUnit.SECONDS));
+        assertInstanceOf(DbLockTimeoutException.class, e.getCause());
+      }
+      assertEquals(held.getLockId(), heldLockId(jdbcTemplate, LockType.CATALOG),
+          "the renewed lock must still be the holder's");
+      holderPod.releaseLock(held, false);
+    } finally {
+      executor.shutdownNow();
+      holderPod.destroy();
+      waiterPod.destroy();
+      jdbcTemplate.update("delete from DB_LOCK where lock_type = 'C'");
+      jdbcTemplate.update("delete from DB_LOCK_HISTORY where lock_type = 'C'");
+    }
+  }
+
+  /**
+   * A renewal after the lease ran out by the database's clock fails, even while this instance's own
+   * hold-timeout has not fired yet and nobody has reclaimed the lock, and it releases the lock on
+   * the spot rather than leaving it for a waiter's reclaim.
+   */
+  @Test
+  void aRenewalAfterTheLeaseExpiredFailsAndReleasesTheLock() throws Exception {
+    JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource());
+    JdbcHelper.createTables(jdbcTemplate, dialect());
+    DbLockServiceImpl pod = new DbLockServiceImpl(jdbcTemplate, testProperties());
+    try {
+      AcquiredLock stalled = pod.acquireLock(LockType.LOCK_Y, "1.0");
+      // As the database sees a holder that stalled for a day: far past its 60 s lease, whatever
+      // the time zones of the JVM and the server.
+      jdbcTemplate.update("update DB_LOCK set created_on = ? where id = ?",
+          Timestamp.from(Instant.now().minus(Duration.ofDays(1))), stalled.getLockId());
+
+      assertThrows(DbLockLostException.class, () -> pod.renewLock(stalled));
+
+      assertFalse(pod.hasLock(LockType.LOCK_Y), "the expired lock must be released");
+      assertEquals(1, jdbcTemplate.queryForObject(
+          "select count(*) from DB_LOCK_HISTORY where lock_id = ?", Integer.class,
+          stalled.getLockId()));
+    } finally {
+      pod.destroy();
+      jdbcTemplate.update("delete from DB_LOCK where lock_type = 'Y'");
+      jdbcTemplate.update("delete from DB_LOCK_HISTORY where lock_type = 'Y'");
+    }
+  }
+
+  @Test
+  void aRenewalAfterTheReleaseFails() throws Exception {
+    JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource());
+    JdbcHelper.createTables(jdbcTemplate, dialect());
+    DbLockServiceImpl pod = new DbLockServiceImpl(jdbcTemplate, testProperties());
+    try {
+      AcquiredLock lock = pod.acquireLock(LockType.LOCK_Z, "1.0");
+      pod.releaseLock(lock, false);
+
+      assertThrows(DbLockLostException.class, () -> pod.renewLock(lock));
+      assertFalse(pod.hasLock(LockType.LOCK_Z));
+    } finally {
+      pod.destroy();
+      jdbcTemplate.update("delete from DB_LOCK_HISTORY where lock_type = 'Z'");
+    }
+  }
+
+  private static int heldLockId(JdbcTemplate jdbcTemplate, LockType lockType) {
+    Integer id = jdbcTemplate.queryForObject("select id from DB_LOCK where lock_type = ?",
+        Integer.class, lockType.getDbValue());
+    return id == null ? -1 : id;
   }
 
   private static DbLockProperties testProperties() {
