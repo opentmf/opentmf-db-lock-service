@@ -27,6 +27,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 ### Changed
 - Spring Boot 4.1.2; jacoco-maven-plugin 0.8.16, maven-surefire-plugin and
   maven-failsafe-plugin 3.6.1, maven-enforcer-plugin 3.7.0.
+- Testcontainers 2.0.5 (test scope), now resolved from the Spring Boot BOM instead of a
+  `testcontainers.version` pin. Testcontainers 2 renamed its modules (`postgresql` →
+  `testcontainers-postgresql`, and so on), so the 1.x pin was no longer visible as behind.
 
 ## [3.0.0] - 2026-10-15
 
