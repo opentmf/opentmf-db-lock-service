@@ -414,6 +414,39 @@ abstract class AbstractDialectIT {
     }
   }
 
+  /**
+   * Only the holder renews. Another instance that renews the holder's lock, live and well within
+   * its lease, is refused, and the lease it tried to extend is left exactly as it was: same lock,
+   * same {@code created_on}, still the holder's to renew.
+   */
+  @Test
+  void aRenewalByAnInstanceThatDoesNotHoldTheLockIsRefused() throws Exception {
+    JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource());
+    JdbcHelper.createTables(jdbcTemplate, dialect());
+    DbLockServiceImpl holderPod = new DbLockServiceImpl(jdbcTemplate, testProperties());
+    DbLockServiceImpl otherPod = new DbLockServiceImpl(jdbcTemplate, testProperties());
+    try {
+      AcquiredLock held = holderPod.acquireLock(LockType.LOCK_Y, "1.0");
+      Timestamp leaseStart = jdbcTemplate.queryForObject(
+          "select created_on from DB_LOCK where id = ?", Timestamp.class, held.getLockId());
+
+      assertThrows(DbLockLostException.class, () -> otherPod.renewLock(held));
+
+      assertEquals(held.getLockId(), heldLockId(jdbcTemplate, LockType.LOCK_Y),
+          "a refused renewal must leave the holder's lock in place");
+      assertEquals(leaseStart, jdbcTemplate.queryForObject(
+          "select created_on from DB_LOCK where id = ?", Timestamp.class, held.getLockId()),
+          "a refused renewal must not extend the lease");
+      assertDoesNotThrow(() -> holderPod.renewLock(held));
+      holderPod.releaseLock(held, false);
+    } finally {
+      holderPod.destroy();
+      otherPod.destroy();
+      jdbcTemplate.update("delete from DB_LOCK where lock_type = 'Y'");
+      jdbcTemplate.update("delete from DB_LOCK_HISTORY where lock_type = 'Y'");
+    }
+  }
+
   @Test
   void aRenewalAfterTheReleaseFails() throws Exception {
     JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource());
