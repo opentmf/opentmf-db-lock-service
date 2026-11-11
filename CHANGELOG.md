@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
-## [3.1.0] - 2026-11-09
+## [3.1.0] - 2026-11-11
 
 ### Added
 - **`DbLockService.renewLock(AcquiredLock)`** — a heartbeat for long-held
