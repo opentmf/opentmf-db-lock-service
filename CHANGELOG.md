@@ -30,12 +30,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   answer. The library's `DbLockServiceImpl` overrides it.
 
 ### Changed
-- A waiter's stale-lock reclaim and the startup sweep take the lock row's
-  write lock with a no-op `UPDATE` on `DB_LOCK`, which 3.0.x never issued: a
-  database user granted only `SELECT`, `INSERT` and `DELETE` on `DB_LOCK` now
-  needs `UPDATE` as well (a user that created the tables itself owns them already).
-- Spring Boot 4.1.2; jacoco-maven-plugin 0.8.16, maven-surefire-plugin and
-  maven-failsafe-plugin 3.6.1, maven-enforcer-plugin 3.7.0.
+- **New database right: `UPDATE` on `DB_LOCK`.** 3.0.x needed only `SELECT`,
+  `INSERT` and `DELETE` on that table; 3.1.0 also needs `UPDATE`. Three calls
+  use it: the stale-lock reclaim inside `acquireLock` (taking over a lock whose
+  holder crashed), the start-up sweep of stale locks, and `renewLock`. Without
+  it, a crashed holder's lock is never reclaimed: every `acquireLock` of that
+  lock type logs a "Failed to reclaim stale lock" warning on each poll and
+  ends in `DbLockTimeoutException`, until the row is deleted by hand, and
+  `renewLock` fails with a `DbLockException`. A deployment that does not call
+  `renewLock` notices nothing until a lock goes stale. A database user that created the tables itself
+  (`create-tables: true`) owns them and already has the right; grant `UPDATE`
+  on `DB_LOCK` to a user that was given less.
+- Spring Boot 4.2.0 (Spring Framework 7.1.0); jacoco-maven-plugin 0.8.16,
+  maven-surefire-plugin and maven-failsafe-plugin 3.6.1, maven-enforcer-plugin
+  3.7.0, sonar-maven-plugin 5.9.0.7382.
 - Testcontainers 2.0.5 (test scope), now resolved from the Spring Boot BOM instead of a
   `testcontainers.version` pin. Testcontainers 2 renamed its modules (`postgresql` →
   `testcontainers-postgresql`, and so on), so the 1.x pin was no longer visible as behind.

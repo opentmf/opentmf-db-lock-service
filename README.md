@@ -123,7 +123,7 @@ The contract:
 
 A renewal sets `DB_LOCK.created_on` to the time of the renewal, so the `lock_acquired_on` that `DB_LOCK_HISTORY` and `DB_LOCK_LATEST` later copy from it is the start of the lock's last lease, not of the first acquisition. No schema change is involved, and an instance still on 3.0.x measures a lock's age from `created_on` too, so it also honours a renewal during a rolling upgrade.
 
-The re-read under the row's write lock is taken with a no-op `update DB_LOCK … where id = ?`, so since 3.1.0 a waiter's stale-lock reclaim and the startup sweep issue an `UPDATE` on `DB_LOCK`, which 3.0.x never did. A database user that was granted only `SELECT`, `INSERT` and `DELETE` on `DB_LOCK` needs `UPDATE` too; a user that created the tables itself (`create-tables: true`) owns them and has it already.
+The re-read under the row's write lock is taken with a no-op `update DB_LOCK … where id = ?`, so since 3.1.0 a waiter's stale-lock reclaim and the startup sweep issue an `UPDATE` on `DB_LOCK`, which 3.0.x never did. A database user that was granted only `SELECT`, `INSERT` and `DELETE` on `DB_LOCK` needs `UPDATE` too; a user that created the tables itself (`create-tables: true`) owns them and has it already. Without it, a crashed holder's lock is never reclaimed: each `acquireLock` of that lock type ends in `DbLockTimeoutException` until the row is deleted by hand, and `renewLock` fails with a `DbLockException`.
 
 ## Supported Databases
 

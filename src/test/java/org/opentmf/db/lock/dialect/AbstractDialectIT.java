@@ -223,6 +223,46 @@ abstract class AbstractDialectIT {
   }
 
   /**
+   * The startup sweep removes every lock held past its hold-timeout, of any type: each is moved to
+   * {@code DB_LOCK_HISTORY} and is gone from {@code DB_LOCK}. Two stale locks of two types, so the
+   * sweep has to go round its loop to pass.
+   */
+  @Test
+  void theStartupSweepRemovesEveryStaleLock() throws Exception {
+    JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource());
+    JdbcHelper.createTables(jdbcTemplate, dialect());
+    DbLockServiceImpl crashedPod = new DbLockServiceImpl(jdbcTemplate, testProperties());
+    DbLockProperties restartedProps = testProperties();
+    restartedProps.setLockHoldTimeout(1000L);
+    DbLockServiceImpl restartedPod = new DbLockServiceImpl(jdbcTemplate, restartedProps);
+    try {
+      AcquiredLock staleX = crashedPod.acquireLock(LockType.LOCK_X, "1.0");
+      AcquiredLock staleY = crashedPod.acquireLock(LockType.LOCK_Y, "1.0");
+      // The sweep runs once, unlike a waiter that polls until the lock goes stale. MySQL keeps
+      // created_on and reads the database's time in whole seconds, so a lock 1.5 s old can read
+      // as 1 s: not yet past a 1 s hold-timeout. 3 s is past it on every dialect.
+      await().pollDelay(Duration.ofMillis(3000)).until(() -> true);
+
+      restartedPod.removeStaleLocks();
+
+      for (AcquiredLock stale : List.of(staleX, staleY)) {
+        assertEquals(0, jdbcTemplate.queryForObject(
+            "select count(*) from DB_LOCK where id = ?", Integer.class, stale.getLockId()),
+            "the sweep must remove the stale " + stale.getLockType() + " lock");
+        assertEquals(1, jdbcTemplate.queryForObject(
+            "select count(*) from DB_LOCK_HISTORY where lock_id = ?", Integer.class,
+            stale.getLockId()),
+            "the stale " + stale.getLockType() + " lock must be moved to DB_LOCK_HISTORY");
+      }
+    } finally {
+      crashedPod.destroy();
+      restartedPod.destroy();
+      jdbcTemplate.update("delete from DB_LOCK where lock_type in ('X', 'Y')");
+      jdbcTemplate.update("delete from DB_LOCK_HISTORY where lock_type in ('X', 'Y')");
+    }
+  }
+
+  /**
    * A lock still within its hold-timeout is not reclaimed, neither by a waiter nor by the startup
    * sweep. The age of a lock has to be measured with the database's own clock: up to 2.2.2 it was
    * {@code created_on}, stamped by the database, against the JVM's clock, so with a plain
