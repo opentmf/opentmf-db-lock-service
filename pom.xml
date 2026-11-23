@@ -40,12 +40,12 @@
     <maven.compiler.source>${java.version}</maven.compiler.source>
     <maven.compiler.target>${java.version}</maven.compiler.target>
 
-    <spring-boot.version>4.1.2</spring-boot.version>
+    <spring-boot.version>4.2.0</spring-boot.version>
     <archunit.version>1.5.1</archunit.version>
     <system-stubs-jupiter.version>2.1.8</system-stubs-jupiter.version>
 
     <jacoco-maven-plugin.version>0.8.16</jacoco-maven-plugin.version>
-    <sonar-plugin.version>5.8.0.7211</sonar-plugin.version>
+    <sonar-plugin.version>5.9.0.7382</sonar-plugin.version>
     <maven-surefire-plugin.version>3.6.1</maven-surefire-plugin.version>
     <maven-failsafe-plugin.version>3.6.1</maven-failsafe-plugin.version>
     <maven-source-plugin.version>3.4.0</maven-source-plugin.version>
