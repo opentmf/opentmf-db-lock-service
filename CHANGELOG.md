@@ -23,8 +23,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   renewal in flight leaves the renewed lock alone. A renewal rewrites
   `DB_LOCK.created_on`; no schema change, and 3.0.x instances honour it. See
   the README's "Renewing a long-held lock with `renewLock`".
+- `renewLock` is a `default` method of `DbLockService`, so a class that
+  implements the interface against 3.0.x still compiles and links. On such a
+  class a renewal throws `DbLockLostException` ("… does not support
+  renewLock …"): it cannot extend the lease, and stopping the work is the safe
+  answer. The library's `DbLockServiceImpl` overrides it.
 
 ### Changed
+- A waiter's stale-lock reclaim and the startup sweep take the lock row's
+  write lock with a no-op `UPDATE` on `DB_LOCK`, which 3.0.x never issued: a
+  database user granted only `SELECT`, `INSERT` and `DELETE` on `DB_LOCK` now
+  needs `UPDATE` as well (a user that created the tables itself owns them already).
 - Spring Boot 4.1.2; jacoco-maven-plugin 0.8.16, maven-surefire-plugin and
   maven-failsafe-plugin 3.6.1, maven-enforcer-plugin 3.7.0.
 - Testcontainers 2.0.5 (test scope), now resolved from the Spring Boot BOM instead of a

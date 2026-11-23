@@ -54,15 +54,26 @@ public interface DbLockService {
    * set to the time of the renewal, so the {@code lock_acquired_on} later copied from it into
    * {@code DB_LOCK_HISTORY} and {@code DB_LOCK_LATEST} is the start of the lock's last lease.
    *
+   * <p>The method has a default so that an implementation written before 3.1.0 still compiles and
+   * links. That default cannot extend a lease, so it refuses with a {@link DbLockLostException}:
+   * a caller must not go on as if its lock were renewed, and the lock-lost path (stop the work)
+   * is the safe one, where a plain {@link DbLockException} would invite a retry on the next beat
+   * while the lease ran out. The library's own implementation overrides it.
+   *
    * @param lock The acquired lock details, as returned by {@link #acquireLock(LockType, String)}.
    * @throws DbLockLostException when the lock is no longer held by the caller — released, expired,
-   *     reclaimed by another instance, or never acquired by this one. The work it guarded is no
-   *     longer protected.
+   *     reclaimed by another instance, or never acquired by this one — or when this implementation
+   *     does not support renewal. The work it guarded is no longer protected.
    * @throws DbLockException when the database could not be reached; the lease is then unchanged,
    *     and so is this instance's hold-timeout for it.
    * @since 3.1.0
    */
-  void renewLock(AcquiredLock lock) throws DbLockException;
+  default void renewLock(AcquiredLock lock) throws DbLockException {
+    throw new DbLockLostException(String.format("Cannot renew lock id=%d, type=%s: %s does not "
+        + "support renewLock (it implements the DbLockService interface of a release before "
+        + "3.1.0). The lease is not extended; the lock is lost once its lock-hold-timeout runs "
+        + "out.", lock.getLockId(), lock.getLockType(), getClass().getName()));
+  }
 
     /**
      * Checks if there is an ongoing lock of the given type, returns true if.

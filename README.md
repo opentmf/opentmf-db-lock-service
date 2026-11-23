@@ -119,8 +119,11 @@ The contract:
 - **A renewed lock is fresh for every instance.** Its age counts from the renewal for a waiter's stale-lock reclaim and for the startup sweep, and the holder's own hold-timeout is re-armed for the full period. A renewal and a reclaim of the same lock never both succeed: each takes the lock row's write lock and then reads the row again, so a reclaim that meets a renewal in flight sees the renewed lease.
 - **A renewal after expiry fails loudly.** When the lease has already run out — the hold-timeout fired, another instance reclaimed the lock, or the database's clock says it is past its hold-timeout — `renewLock` throws `DbLockLostException` (a `DbLockException`). A lock that is expired but still in the database is released on the spot. A database failure throws a plain `DbLockException` and leaves the lease and this instance's hold-timeout as they were.
 - **Renew every third of the hold-timeout.** That leaves room for two missed beats before the lease runs out.
+- **An implementation written before 3.1.0 refuses.** `renewLock` is a `default` method of the interface, so a class that implemented `DbLockService` against 3.0.x still compiles and links. Its renewal throws `DbLockLostException` ("… does not support renewLock …"): it cannot extend the lease, and the lock-lost path — stop the work — is the safe one. `DbLockServiceImpl`, the implementation the auto-configuration registers, renews as described above.
 
 A renewal sets `DB_LOCK.created_on` to the time of the renewal, so the `lock_acquired_on` that `DB_LOCK_HISTORY` and `DB_LOCK_LATEST` later copy from it is the start of the lock's last lease, not of the first acquisition. No schema change is involved, and an instance still on 3.0.x measures a lock's age from `created_on` too, so it also honours a renewal during a rolling upgrade.
+
+The re-read under the row's write lock is taken with a no-op `update DB_LOCK … where id = ?`, so since 3.1.0 a waiter's stale-lock reclaim and the startup sweep issue an `UPDATE` on `DB_LOCK`, which 3.0.x never did. A database user that was granted only `SELECT`, `INSERT` and `DELETE` on `DB_LOCK` needs `UPDATE` too; a user that created the tables itself (`create-tables: true`) owns them and has it already.
 
 ## Supported Databases
 
