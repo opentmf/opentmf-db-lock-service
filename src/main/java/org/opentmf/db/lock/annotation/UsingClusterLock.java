@@ -21,7 +21,7 @@ import java.lang.annotation.Target;
  *
  * <p>When the annotated method declares a {@link org.opentmf.db.lock.model.LockContext}
  * parameter, the aspect populates it with details of the current run and also honours
- * {@link org.opentmf.db.lock.model.LockContext#isSuccess()} on return: if the method
+ * {@code context.isSuccess()} on return: if the method
  * calls {@code context.setSuccess(false)} before returning, the lock is released
  * <em>without</em> recording the requested version as the latest successful one. Throwing
  * an exception always releases the lock with success=false regardless of the context.

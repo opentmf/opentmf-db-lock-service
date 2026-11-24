@@ -37,7 +37,7 @@ public interface DbLockService {
    * <p>The contract:
    * <ul>
    *   <li>Only the holder can renew: the service instance that acquired the lock, while it still
-   *       holds it. The lock is identified by its id ({@link AcquiredLock#getLockId()}), which is
+   *       holds it. The lock is identified by its id ({@code AcquiredLock.getLockId()}), which is
    *       unique to one acquisition; a later lock of the same type has another id and is never
    *       renewed by this call.</li>
    *   <li>A renewed lock is judged fresh by every instance: its age is measured from the renewal,
